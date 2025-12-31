@@ -46,6 +46,8 @@ class SupplyDemandParameters:
     """
     
     # Candle Classification
+    # Note: These thresholds are complementary - a candle is boring if body <= threshold,
+    # and exciting if body > threshold. The same value creates a clear boundary.
     boring_body_ratio: float = 0.50  # body <= 50% of range = boring
     exciting_body_ratio: float = 0.50  # body > 50% of range = exciting
     
@@ -73,8 +75,8 @@ class SupplyDemandParameters:
     min_reward_risk: float = 3.0  # Minimum R:R to consider trade
     
     # Multi-Timeframe Configuration
-    htf_period: str = "4h"  # Higher timeframe for curve analysis
-    itf_period: str = "1h"  # Intermediate timeframe for trend
+    htf_period: str = "4H"  # Higher timeframe for curve analysis
+    itf_period: str = "1H"  # Intermediate timeframe for trend
     ltf_period: str = "15m"  # Lower timeframe for zones and entry
     rtf_period: Optional[str] = "5m"  # Refining timeframe (optional)
     
@@ -83,7 +85,7 @@ class SupplyDemandParameters:
     trend_pivot_count: int = 4  # Number of pivots to analyze for trend
     
     # Entry Mode
-    entry_mode: str = "limit"  # "limit" or "confirmation"
+    entry_mode: EntryMode = EntryMode.LIMIT  # LIMIT or CONFIRMATION
 
 
 @dataclass
