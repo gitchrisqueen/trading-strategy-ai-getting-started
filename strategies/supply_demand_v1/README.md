@@ -767,6 +767,105 @@ For each trade:
 4. **Zone subjectivity**: Base identification can vary slightly in edge cases
 5. **Slippage sensitive**: Tight stops can lead to premature exit in volatile markets
 
+## How to Run Experiments
+
+The strategy includes a dedicated experiment runner for repeatable backtests across multiple symbols and time ranges. This generates machine-readable artifacts for comparing runs between PRs.
+
+### Quick Start
+
+Run a backtest experiment using the CLI:
+
+```bash
+# Run default experiment (5 symbols)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_default.yaml
+
+# Run wide symbols experiment (15 symbols)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_wide_symbols.yaml
+```
+
+### Configuration Files
+
+Experiment configurations are stored in `./experiments/`:
+
+- `sd_v1_default.yaml` - Basic configuration with 5 symbols for quick testing
+- `sd_v1_wide_symbols.yaml` - Comprehensive configuration with 15 symbols
+
+Each configuration includes:
+- **Symbols**: List of trading pairs to backtest
+- **Time Range**: Start and end dates
+- **Timeframes**: HTF/ITF/LTF settings
+- **Scoring**: Odds enhancer thresholds and minimum setup score
+- **Trade Management**: Risk %, R multiples, stop/target settings
+- **Costs**: Trading fees and slippage in basis points
+- **Data Generation**: Parameters for synthetic candle generation
+
+### Output Artifacts
+
+Each run creates a timestamped folder in `./artifacts/sd_v1/<timestamp>_<short_hash>/` containing:
+
+| File | Description |
+|------|-------------|
+| **summary.json** | Aggregate metrics + per-symbol breakdown |
+| **trades.csv** | All trades with: symbol, side, entry, stop, target, planned_R, realized_R, entry_time, exit_time, exit_reason, score, curve_state, trend_state |
+| **zones.csv** | All detected zones with: zone_type, proximal, distal, created_at, touches, score inputs |
+| **run_manifest.json** | Git commit hash, config used, Python version, timestamp |
+| **violations.json** | Integrity check results: planned_R violations, entry timing issues, look-ahead flags |
+
+### Programmatic Usage
+
+You can also use the runner directly in Python:
+
+```python
+from strategies.supply_demand_v1.runner import run_backtest_experiment, write_artifacts, create_artifacts_folder
+
+# Run experiment
+result = run_backtest_experiment("experiments/sd_v1_default.yaml")
+
+# Access results
+print(f"Total trades: {result.aggregate_metrics['total_trades']}")
+print(f"Win rate: {result.aggregate_metrics['overall_win_rate']:.2%}")
+
+# Write artifacts
+artifacts_dir = create_artifacts_folder()
+write_artifacts(result, artifacts_dir)
+```
+
+### Integrity Checks
+
+The runner automatically validates backtest integrity by checking for:
+
+1. **Minimum R Enforcement**: Flags any trade with `planned_R < min_reward_risk`
+2. **Entry Timing**: Ensures entries occur after zone creation (no look-ahead bias)
+3. **R Calculation Consistency**: Validates R = abs(target-entry)/abs(entry-stop)
+
+Violations are reported in `violations.json` for debugging.
+
+### Creating Custom Experiments
+
+To create a new experiment configuration:
+
+1. Copy an existing config: `cp experiments/sd_v1_default.yaml experiments/my_experiment.yaml`
+2. Edit parameters as needed (symbols, dates, scoring thresholds, etc.)
+3. Run: `python scripts/run_supply_demand_v1.py --config experiments/my_experiment.yaml`
+
+### Comparing Runs Between PRs
+
+Use the artifacts to compare strategy changes:
+
+```bash
+# Before PR
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_default.yaml
+# Artifacts: artifacts/sd_v1/20241231_120000_abc12345/
+
+# After PR (with changes)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_default.yaml
+# Artifacts: artifacts/sd_v1/20241231_130000_def67890/
+
+# Compare summary.json files to see impact of changes
+```
+
+This deterministic output allows you to measure the impact of code changes on strategy performance.
+
 ## Implementation Notes
 
 The strategy is implemented in `strategies/supply_demand_v1/strategy.py` with:
