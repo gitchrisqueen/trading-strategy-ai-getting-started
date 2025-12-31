@@ -73,16 +73,17 @@ class SupplyDemandParameters:
     breakeven_at_r: float = 2.0  # Move stop to BE at 2R
     take_profit_at_r: float = 3.0  # Close position at 3R
     min_reward_risk: float = 3.0  # Minimum R:R to consider trade
+    stop_buffer_pct: float = 0.001  # Buffer beyond distal for stop (0.1%)
     
     # Multi-Timeframe Configuration
-    htf_period: str = "4H"  # Higher timeframe for curve analysis
-    itf_period: str = "1H"  # Intermediate timeframe for trend
-    ltf_period: str = "15m"  # Lower timeframe for zones and entry
-    rtf_period: Optional[str] = "5m"  # Refining timeframe (optional)
+    htf_tf: str = "4h"  # Higher timeframe for curve analysis
+    itf_tf: str = "1h"  # Intermediate timeframe for trend
+    ltf_tf: str = "15m"  # Lower timeframe for zones and entry
+    rtf_tf: Optional[str] = "5m"  # Refining timeframe (optional)
     
     # Trend Detection
-    pivot_lookback: int = 5  # Lookback period for pivot detection
-    trend_pivot_count: int = 4  # Number of pivots to analyze for trend
+    pivot_len: int = 5  # Lookback period for pivot detection
+    pivots_to_consider: int = 4  # Number of pivots to analyze for trend
     
     # Entry Mode
     entry_mode: EntryMode = EntryMode.LIMIT  # LIMIT or CONFIRMATION
@@ -603,16 +604,43 @@ def find_nearest_fresh_zones_htf(
     Returns:
         Tuple of (supply_zone_above, demand_zone_below)
         Either can be None if not found
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement HTF zone finding
-    # - Detect all zones on HTF
-    # - Filter to fresh zones only
-    # - Find nearest supply above current price
-    # - Find nearest demand below current price
-    raise NotImplementedError("HTF zone finding to be implemented")
+    # Detect all zones on HTF
+    all_zones = detect_zones_dbr_rbd(candles, parameters)
+    
+    # Update freshness for all zones
+    current_idx = len(candles) - 1
+    for zone in all_zones:
+        is_zone_fresh(zone, candles, current_idx)
+    
+    # Filter to fresh zones only
+    fresh_zones = [z for z in all_zones if z.is_fresh]
+    
+    # Find nearest fresh supply above current price
+    supply_above = None
+    min_distance_above = float('inf')
+    for zone in fresh_zones:
+        if zone.zone_type == ZoneType.SUPPLY:
+            # For supply zones, proximal is the lower boundary
+            if zone.proximal > current_price:
+                distance = zone.proximal - current_price
+                if distance < min_distance_above:
+                    min_distance_above = distance
+                    supply_above = zone
+    
+    # Find nearest fresh demand below current price
+    demand_below = None
+    min_distance_below = float('inf')
+    for zone in fresh_zones:
+        if zone.zone_type == ZoneType.DEMAND:
+            # For demand zones, proximal is the upper boundary
+            if zone.proximal < current_price:
+                distance = current_price - zone.proximal
+                if distance < min_distance_below:
+                    min_distance_below = distance
+                    demand_below = zone
+    
+    return supply_above, demand_below
 
 
 def curve_location(
@@ -639,15 +667,37 @@ def curve_location(
         - Top third = HIGH
         - Middle third = EQUILIBRIUM
         - Bottom third = LOW
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement curve location logic
-    # - Extract proximal lines from zones
-    # - Calculate range and thirds
-    # - Determine which third current price falls into
-    raise NotImplementedError("Curve location analysis to be implemented")
+    # If we don't have both zones, default to EQUILIBRIUM
+    if supply_zone_above is None or demand_zone_below is None:
+        return CurveLocation.EQUILIBRIUM
+    
+    # Get proximal lines
+    supply_proximal = supply_zone_above.proximal
+    demand_proximal = demand_zone_below.proximal
+    
+    # Calculate range and thirds
+    total_range = supply_proximal - demand_proximal
+    
+    # If range is invalid (should not happen), default to EQUILIBRIUM
+    if total_range <= 0:
+        return CurveLocation.EQUILIBRIUM
+    
+    # Calculate thirds
+    third = total_range / 3.0
+    
+    # Bottom third: [demand_proximal, demand_proximal + third)
+    low_boundary = demand_proximal + third
+    # Middle third: [demand_proximal + third, demand_proximal + 2*third)
+    eq_boundary = demand_proximal + 2 * third
+    # Top third: [demand_proximal + 2*third, supply_proximal]
+    
+    if current_price < low_boundary:
+        return CurveLocation.LOW
+    elif current_price < eq_boundary:
+        return CurveLocation.EQUILIBRIUM
+    else:
+        return CurveLocation.HIGH
 
 
 def trend_direction_itf(
@@ -663,20 +713,72 @@ def trend_direction_itf(
     
     Args:
         candles: ITF candle data
-        parameters: Strategy parameters (pivot_lookback, trend_pivot_count)
+        parameters: Strategy parameters (pivot_len, pivots_to_consider)
     
     Returns:
         TrendDirection (UP, DOWN, or SIDEWAYS)
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement trend analysis
-    # - Detect pivot highs and lows using lookback period
-    # - Analyze last N pivots
-    # - Classify as HH/HL, LH/LL, or mixed
-    # - Return trend direction
-    raise NotImplementedError("Trend direction analysis to be implemented")
+    # Detect pivots
+    pivot_highs, pivot_lows = detect_pivot_highs_lows(candles, parameters.pivot_len)
+    
+    # Need at least 2 pivots of each type to determine trend
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return TrendDirection.SIDEWAYS
+    
+    # Get the most recent pivots (up to pivots_to_consider)
+    recent_highs = pivot_highs[-parameters.pivots_to_consider:]
+    recent_lows = pivot_lows[-parameters.pivots_to_consider:]
+    
+    # Need at least 2 pivots to compare
+    if len(recent_highs) < 2 or len(recent_lows) < 2:
+        return TrendDirection.SIDEWAYS
+    
+    # Analyze highs: are they making higher highs (HH)?
+    highs_ascending = True
+    for i in range(1, len(recent_highs)):
+        prev_idx = recent_highs[i - 1]
+        curr_idx = recent_highs[i]
+        if candles[curr_idx]['high'] <= candles[prev_idx]['high']:
+            highs_ascending = False
+            break
+    
+    # Analyze highs: are they making lower highs (LH)?
+    highs_descending = True
+    for i in range(1, len(recent_highs)):
+        prev_idx = recent_highs[i - 1]
+        curr_idx = recent_highs[i]
+        if candles[curr_idx]['high'] >= candles[prev_idx]['high']:
+            highs_descending = False
+            break
+    
+    # Analyze lows: are they making higher lows (HL)?
+    lows_ascending = True
+    for i in range(1, len(recent_lows)):
+        prev_idx = recent_lows[i - 1]
+        curr_idx = recent_lows[i]
+        if candles[curr_idx]['low'] <= candles[prev_idx]['low']:
+            lows_ascending = False
+            break
+    
+    # Analyze lows: are they making lower lows (LL)?
+    lows_descending = True
+    for i in range(1, len(recent_lows)):
+        prev_idx = recent_lows[i - 1]
+        curr_idx = recent_lows[i]
+        if candles[curr_idx]['low'] >= candles[prev_idx]['low']:
+            lows_descending = False
+            break
+    
+    # Classify trend
+    # Uptrend: HH and HL
+    if highs_ascending and lows_ascending:
+        return TrendDirection.UP
+    # Downtrend: LH and LL
+    elif highs_descending and lows_descending:
+        return TrendDirection.DOWN
+    # Sideways: Mixed signals
+    else:
+        return TrendDirection.SIDEWAYS
 
 
 # ============================================================================
@@ -688,7 +790,8 @@ def odds_enhancer_score(
     current_price: float,
     curve_loc: CurveLocation,
     trend_dir: TrendDirection,
-    parameters: SupplyDemandParameters
+    parameters: SupplyDemandParameters,
+    opposing_zone: Optional[Zone] = None
 ) -> float:
     """Calculate total odds enhancer score for a zone setup
     
@@ -704,21 +807,73 @@ def odds_enhancer_score(
         curve_loc: Current curve location (HTF)
         trend_dir: Current trend direction (ITF)
         parameters: Strategy parameters
+        opposing_zone: Nearest opposing zone (for profit zone calculation)
     
     Returns:
         Total score (typically 0-10+ range)
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement scoring system
-    # - Calculate freshness score based on touches
-    # - Calculate leg-out strength score
-    # - Calculate base time score
-    # - Calculate profit zone score (distance to opposing zone)
-    # - Add curve/trend alignment bonus
-    # - Return total score
-    raise NotImplementedError("Odds enhancer scoring to be implemented")
+    total_score = 0.0
+    
+    # 1. Freshness score (0 / 1.5 / 3 points)
+    if zone.freshness_touches == parameters.freshness_touches_best:
+        total_score += 3.0  # Fresh (never touched)
+    elif zone.freshness_touches == parameters.freshness_touches_good:
+        total_score += 1.5  # Good (touched once)
+    else:
+        total_score += 0.0  # Poor (touched 2+ times)
+    
+    # 2. Time in base score (0 / 1 / 2 points)
+    if zone.base_len <= parameters.base_time_best:
+        total_score += 2.0  # Best (≤3 candles)
+    elif zone.base_len <= parameters.base_time_good:
+        total_score += 1.0  # Good (4-6 candles)
+    else:
+        total_score += 0.0  # Poor (>6 candles)
+    
+    # 3. Leg-out strength score (0 / 1 / 2 points)
+    # Based on percentage return of the leg-out move
+    if zone.legout_return >= parameters.legout_strength_high_threshold:
+        total_score += 2.0  # Strong (≥10%)
+    elif zone.legout_return >= parameters.legout_strength_mid_threshold:
+        total_score += 1.0  # Moderate (≥5%)
+    else:
+        total_score += 0.0  # Weak (<5%)
+    
+    # 4. Profit zone score (0 / 1.5 / 3 points)
+    # Based on available R multiple to opposing zone
+    if opposing_zone is not None:
+        # Calculate entry and stop for this zone
+        entry_price = zone.proximal
+        
+        # Calculate stop with buffer
+        if zone.zone_type == ZoneType.DEMAND:
+            # Long position: stop below distal
+            stop_loss = zone.distal * (1 - parameters.stop_buffer_pct)
+        else:
+            # Short position: stop above distal
+            stop_loss = zone.distal * (1 + parameters.stop_buffer_pct)
+        
+        risk = abs(entry_price - stop_loss)
+        
+        if risk > 0:
+            # Calculate max reward to opposing zone proximal
+            if zone.zone_type == ZoneType.DEMAND:
+                # Long: opposing zone is supply above
+                max_reward = abs(opposing_zone.proximal - entry_price)
+            else:
+                # Short: opposing zone is demand below
+                max_reward = abs(entry_price - opposing_zone.proximal)
+            
+            available_r = max_reward / risk
+            
+            if available_r >= 3.0:
+                total_score += 3.0  # Excellent (≥3R available)
+            elif available_r >= 2.0:
+                total_score += 1.5  # Good (≥2R available)
+            else:
+                total_score += 0.0  # Poor (<2R available)
+    
+    return total_score
 
 
 # ============================================================================
@@ -730,7 +885,8 @@ def build_trade_plan(
     current_price: float,
     account_size: float,
     parameters: SupplyDemandParameters,
-    opposing_zone: Optional[Zone] = None
+    opposing_zone: Optional[Zone] = None,
+    score: float = 0.0
 ) -> Optional[TradePlan]:
     """Build complete trade plan (SET: Stop, Entry, Target) for a zone
     
@@ -743,6 +899,7 @@ def build_trade_plan(
         account_size: Current account size for position sizing
         parameters: Strategy parameters
         opposing_zone: Nearest opposing zone (for target placement)
+        score: Odds enhancer score for this setup
     
     Returns:
         TradePlan object or None if plan is invalid
@@ -752,19 +909,95 @@ def build_trade_plan(
         - Stop: Beyond distal line (with buffer)
         - Target: Minimum 3R, before opposing zone
         - Position size: 2% risk rule
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement trade plan creation
-    # - Set entry at proximal
-    # - Set stop beyond distal
-    # - Calculate minimum 3R target
-    # - Check opposing zone doesn't interfere
-    # - Calculate position size using risk % rule
-    # - Validate R:R meets minimum
-    # - Create and return TradePlan
-    raise NotImplementedError("Trade plan building to be implemented")
+    # Entry at proximal line
+    entry_price = zone.proximal
+    
+    # Stop beyond distal with buffer
+    if zone.zone_type == ZoneType.DEMAND:
+        # Long position: stop below distal
+        stop_loss = zone.distal * (1 - parameters.stop_buffer_pct)
+        is_long = True
+    else:
+        # Short position: stop above distal
+        stop_loss = zone.distal * (1 + parameters.stop_buffer_pct)
+        is_long = False
+    
+    # Calculate risk
+    risk = abs(entry_price - stop_loss)
+    
+    if risk <= 0:
+        return None  # Invalid trade plan
+    
+    # Calculate minimum 3R target
+    min_target_distance = risk * parameters.min_reward_risk
+    
+    if zone.zone_type == ZoneType.DEMAND:
+        # Long: target above entry
+        min_take_profit = entry_price + min_target_distance
+    else:
+        # Short: target below entry
+        min_take_profit = entry_price - min_target_distance
+    
+    # Adjust target based on opposing zone if available
+    take_profit = min_take_profit
+    
+    if opposing_zone is not None:
+        # Target at opposing zone proximal, but never beyond
+        opposing_proximal = opposing_zone.proximal
+        
+        if zone.zone_type == ZoneType.DEMAND:
+            # Long: opposing zone is supply above
+            # Target at max(3R, opposing_proximal), but never beyond opposing distal
+            opposing_target = opposing_proximal
+            
+            # Ensure we don't go beyond opposing zone
+            if opposing_target > opposing_zone.distal:
+                opposing_target = opposing_zone.distal
+            
+            # Use the minimum of 3R target and opposing zone
+            take_profit = min(max(min_take_profit, opposing_target), opposing_zone.distal)
+        else:
+            # Short: opposing zone is demand below
+            # Target at max(3R, opposing_proximal), but never beyond opposing distal
+            opposing_target = opposing_proximal
+            
+            # Ensure we don't go beyond opposing zone
+            if opposing_target < opposing_zone.distal:
+                opposing_target = opposing_zone.distal
+            
+            # Use the maximum of 3R target and opposing zone
+            take_profit = max(min(min_take_profit, opposing_target), opposing_zone.distal)
+    
+    # Calculate R multiple for this target
+    reward = abs(take_profit - entry_price)
+    r_multiple = reward / risk
+    
+    # Enforce minimum 3R requirement
+    if r_multiple < parameters.min_reward_risk:
+        return None  # Does not meet minimum R:R
+    
+    # Calculate position size using risk percentage rule
+    pos_size = position_size(account_size, entry_price, stop_loss, parameters.risk_pct)
+    
+    # Calculate dollar amounts
+    risk_amount = account_size * parameters.risk_pct
+    reward_amount = pos_size * reward
+    
+    # Create trade plan
+    trade_plan = TradePlan(
+        zone=zone,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        position_size=pos_size,
+        risk_amount=risk_amount,
+        reward_amount=reward_amount,
+        r_multiple=r_multiple,
+        score=score
+    )
+    
+    return trade_plan
 
 
 def position_size(
@@ -790,15 +1023,21 @@ def position_size(
         risk_amount = account_size * risk_pct
         risk_per_unit = abs(entry_price - stop_loss)
         position_size = risk_amount / risk_per_unit
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement position sizing
-    # - Calculate risk amount
-    # - Calculate risk per unit
-    # - Return position size
-    raise NotImplementedError("Position sizing to be implemented")
+    # Calculate risk amount
+    risk_amount = account_size * risk_pct
+    
+    # Calculate risk per unit
+    risk_per_unit = abs(entry_price - stop_loss)
+    
+    # Avoid division by zero
+    if risk_per_unit <= 0:
+        return 0.0
+    
+    # Calculate position size
+    pos_size = risk_amount / risk_per_unit
+    
+    return pos_size
 
 
 def manage_trade_plan(
@@ -822,16 +1061,35 @@ def manage_trade_plan(
         - "update_stop": New stop price if should be moved
         - "take_profit": True if should close position
         - "current_r": Current R multiple achieved
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement trade management
-    # - Calculate current R multiple
-    # - Check if at breakeven threshold (default 2R)
-    # - Check if at profit target (default 3R)
-    # - Return appropriate actions
-    raise NotImplementedError("Trade management to be implemented")
+    # Determine if long or short
+    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    
+    # Calculate current R multiple
+    current_r = calculate_r_multiple(
+        trade_plan.entry_price,
+        current_price,
+        trade_plan.stop_loss,
+        is_long
+    )
+    
+    result = {
+        "update_stop": None,
+        "take_profit": False,
+        "current_r": current_r
+    }
+    
+    # Check if we should take profit at target R multiple
+    if current_r >= parameters.take_profit_at_r:
+        result["take_profit"] = True
+        return result
+    
+    # Check if we should move stop to breakeven
+    if current_r >= parameters.breakeven_at_r:
+        # Move stop to breakeven (entry price)
+        result["update_stop"] = trade_plan.entry_price
+    
+    return result
 
 
 # ============================================================================
@@ -861,12 +1119,20 @@ def calculate_r_multiple(
         risk = abs(entry_price - stop_loss)
         profit = (current_price - entry_price) if long else (entry_price - current_price)
         r_multiple = profit / risk
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement R multiple calculation
-    raise NotImplementedError("R multiple calculation to be implemented")
+    risk = abs(entry_price - stop_loss)
+    
+    if risk <= 0:
+        return 0.0
+    
+    if is_long:
+        profit = current_price - entry_price
+    else:
+        profit = entry_price - current_price
+    
+    r_multiple = profit / risk
+    
+    return r_multiple
 
 
 def calculate_body_and_range(
@@ -904,12 +1170,39 @@ def detect_pivot_highs_lows(
     
     Returns:
         Tuple of (pivot_high_indices, pivot_low_indices)
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement pivot detection
-    # - Scan for local highs (highs higher than neighbors)
-    # - Scan for local lows (lows lower than neighbors)
-    # - Return indices of pivots
-    raise NotImplementedError("Pivot detection to be implemented")
+    pivot_highs = []
+    pivot_lows = []
+    
+    # Need at least lookback*2 + 1 candles to detect a pivot
+    if len(candles) < lookback * 2 + 1:
+        return pivot_highs, pivot_lows
+    
+    # Scan for pivots (cannot detect in first/last 'lookback' candles)
+    for i in range(lookback, len(candles) - lookback):
+        current_high = candles[i]['high']
+        current_low = candles[i]['low']
+        
+        # Check for pivot high
+        is_pivot_high = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['high'] >= current_high or candles[i + j]['high'] >= current_high:
+                is_pivot_high = False
+                break
+        
+        if is_pivot_high:
+            pivot_highs.append(i)
+        
+        # Check for pivot low
+        is_pivot_low = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['low'] <= current_low or candles[i + j]['low'] <= current_low:
+                is_pivot_low = False
+                break
+        
+        if is_pivot_low:
+            pivot_lows.append(i)
+    
+    return pivot_highs, pivot_lows
