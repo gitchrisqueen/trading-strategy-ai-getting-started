@@ -40,8 +40,11 @@ Comprehensive documentation for this repository:
 - **[Repository Map](docs/REPO_MAP.md)** - Complete map of repo structure with descriptions of key files and folders
 - **[Supply & Demand V1 Strategy](strategies/supply_demand_v1/README.md)** - Complete specification of the S&D zone-based trading strategy
 - **[Copilot Workflow Guidelines](docs/COPILOT_WORKFLOW.md)** - Development workflow and PR best practices for future contributions
+- **[GitHub Copilot Instructions](.github/copilot-instructions.md)** - Repository-wide and path-specific instructions for Copilot-assisted development
 
 **New to this repo?** Start with [Project Context](docs/PROJECT_CONTEXT.md) and [Repository Map](docs/REPO_MAP.md) to get oriented.
+
+**Contributing with GitHub Copilot?** See [Copilot Instructions](.github/copilot-instructions.md) for guidance on validation steps, coding standards, and efficient prompt patterns.
 
 # Support and social media
 
