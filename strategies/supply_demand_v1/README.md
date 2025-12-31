@@ -77,30 +77,62 @@ This strategy implements a Supply and Demand (S&D) zone-based trading approach f
 
 ### Running the Backtest
 
-1. Navigate to the notebooks directory
-2. Open the supply_demand_v1 backtest notebook (to be created)
-3. Execute cells in order:
-   - Import dependencies
-   - Load parameters from `strategies/supply_demand_v1/strategy.py`
-   - Load market data
-   - Run backtest with `create_strategy_universe()`, `create_indicators()`, and `decide_trades()`
-   - Visualize results
+The backtest notebook is located at: `notebooks/supply_demand_v1_backtest.ipynb`
 
-Example workflow:
-```python
-from strategies.supply_demand_v1.strategy import (
-    SupplyDemandParameters,
-    create_strategy_universe,
-    create_indicators,
-    decide_trades
-)
+1. Start Jupyter:
+   ```bash
+   jupyter notebook
+   ```
 
-# Initialize parameters with defaults or custom values
-params = SupplyDemandParameters()
+2. Navigate to `notebooks/supply_demand_v1_backtest.ipynb`
 
-# Run backtest using Trading Strategy framework
-# (see example notebooks in notebooks/single-backtest/ for complete setup)
+3. Edit the **Parameters Configuration** cell (first code cell) to customize:
+   - Trading pairs (default: BTC/USDT, ETH/USDT)
+   - Date range
+   - Initial capital
+   - Strategy parameters (risk %, scoring thresholds, etc.)
+
+4. Run all cells in order (Cell → Run All)
+
+### Notebook Features
+
+The notebook demonstrates:
+- **Zone Detection**: Identifies DBR (demand) and RBD (supply) zones in price data
+- **Zone Scoring**: Applies odds enhancers (freshness, leg-out strength, base length)
+- **Trade Simulation**: Generates trade plans and simulates execution
+- **Performance Metrics**: Calculates total trades, win rate, average R, max drawdown
+- **Trade Examples**: Shows detailed entry/stop/target for each trade
+
+### Example Output
+
+The notebook will display:
 ```
+BACKTEST RESULTS SUMMARY
+═══════════════════════════════════════════════════════════
+Account Performance:
+  Initial Capital:    $10,000.00
+  Final Equity:       $12,345.00
+  Total Return:       23.45%
+  Max Drawdown:       -8.50%
+
+Trade Statistics:
+  Total Trades:       25
+  Winning Trades:     16 (64.0%)
+  Losing Trades:      9 (36.0%)
+
+R-Multiple Performance:
+  Average R:          1.85R
+  Average Win:        3.00R
+  Average Loss:       -1.00R
+```
+
+### Customization
+
+All key parameters are in the first code cell. To adjust strategy behavior:
+- Change `min_setup_score` to filter trade quality (higher = more selective)
+- Adjust `risk_pct` to control position sizing (default 2%)
+- Modify `boring_body_ratio` and `exciting_body_ratio` for candle classification
+- Update `min_reward_risk` to set minimum R:R ratio (default 3:1)
 
 ## How to Run Tests
 
@@ -133,15 +165,15 @@ poetry run pytest -v tests/test_supply_demand_v1.py
 
 ## Implementation Status
 
-**Current Version**: v1.0-skeleton
+**Current Version**: v1.0
 
 This package currently contains:
 - ✅ Complete text-only specification (TradingStrategySpec.md)
 - ✅ Documentation and README
-- ✅ Strategy module structure with function stubs
-- ❌ Business logic implementation (planned for future PR)
-- ❌ Backtest notebook (planned for future PR)
-- ❌ Unit tests (planned for future PR)
+- ✅ Strategy module structure with full implementation
+- ✅ Business logic implementation (zone detection, scoring, trade planning)
+- ✅ Backtest notebook (`notebooks/supply_demand_v1_backtest.ipynb`)
+- ⚠️ Unit tests (basic tests exist, comprehensive tests planned for future PR)
 
 ## Future Enhancements (v2+)
 
