@@ -38,6 +38,13 @@ class EntryMode(Enum):
     CONFIRMATION = "confirmation"  # Wait for price to reverse through proximal
 
 
+class OrderState(Enum):
+    """Order state for limit orders"""
+    PENDING = "pending"  # Order placed but not filled
+    FILLED = "filled"  # Order filled
+    CANCELLED = "cancelled"  # Order cancelled (TTL expired)
+
+
 @dataclass
 class SupplyDemandParameters:
     """Configuration parameters for Supply and Demand strategy
@@ -87,6 +94,13 @@ class SupplyDemandParameters:
     
     # Entry Mode
     entry_mode: EntryMode = EntryMode.LIMIT  # LIMIT or CONFIRMATION
+    
+    # Trading Costs
+    fees_bps: float = 10.0  # Trading fees in basis points (default 10 bps = 0.1%)
+    slippage_bps: float = 5.0  # Slippage in basis points (default 5 bps = 0.05%)
+    
+    # Limit Order Configuration
+    ttl_bars: Optional[int] = 10  # Time-to-live in bars for limit orders (None = no expiry)
 
 
 @dataclass
@@ -137,6 +151,12 @@ class TradePlan:
         reward_amount: Dollar amount of potential profit
         r_multiple: Reward-to-risk ratio
         score: Odds enhancer total score
+        order_state: Current state of the limit order (PENDING, FILLED, CANCELLED)
+        placed_at_idx: Candle index when order was placed
+        filled_at_idx: Candle index when order was filled (None if not filled)
+        actual_entry_price: Actual entry price after fees and slippage
+        entry_cost: Total cost of entry (fees + slippage)
+        exit_cost: Total cost of exit (fees + slippage)
     """
     zone: Zone
     entry_price: float
@@ -144,6 +164,15 @@ class TradePlan:
     take_profit: float
     position_size: float
     risk_amount: float
+    reward_amount: float
+    r_multiple: float
+    score: float
+    order_state: OrderState = OrderState.PENDING
+    placed_at_idx: Optional[int] = None
+    filled_at_idx: Optional[int] = None
+    actual_entry_price: Optional[float] = None
+    entry_cost: float = 0.0
+    exit_cost: float = 0.0
     reward_amount: float
     r_multiple: float
     score: float
@@ -1206,3 +1235,155 @@ def detect_pivot_highs_lows(
             pivot_lows.append(i)
     
     return pivot_highs, pivot_lows
+
+
+def calculate_trading_costs(
+    price: float,
+    position_size: float,
+    fees_bps: float,
+    slippage_bps: float
+) -> float:
+    """Calculate total trading costs (fees + slippage)
+    
+    Args:
+        price: Trade price
+        position_size: Position size in units
+        fees_bps: Trading fees in basis points
+        slippage_bps: Slippage in basis points
+    
+    Returns:
+        Total cost in dollars
+    
+    Formula:
+        total_bps = fees_bps + slippage_bps
+        cost = (price * position_size * total_bps) / 10000
+    """
+    total_bps = fees_bps + slippage_bps
+    cost = (price * position_size * total_bps) / 10000.0
+    return cost
+
+
+def check_limit_order_fill(
+    trade_plan: TradePlan,
+    candles: Any,
+    current_idx: int,
+    parameters: SupplyDemandParameters
+) -> bool:
+    """Check if a limit order should be filled based on price action
+    
+    Args:
+        trade_plan: Trade plan with pending limit order
+        candles: OHLC candle data
+        current_idx: Current candle index
+        parameters: Strategy parameters
+    
+    Returns:
+        True if order should be filled, False otherwise
+    
+    Side effects:
+        Updates trade_plan.order_state, trade_plan.filled_at_idx,
+        trade_plan.actual_entry_price, and trade_plan.entry_cost
+    
+    Rules:
+        - Long (DEMAND): fills if candle's low <= limit price
+        - Short (SUPPLY): fills if candle's high >= limit price
+        - TTL: Cancel if (current_idx - placed_at_idx) >= ttl_bars
+    """
+    # Check if order is still pending
+    if trade_plan.order_state != OrderState.PENDING:
+        return False
+    
+    # Check TTL expiration
+    if parameters.ttl_bars is not None and trade_plan.placed_at_idx is not None:
+        bars_elapsed = current_idx - trade_plan.placed_at_idx
+        if bars_elapsed >= parameters.ttl_bars:
+            # Cancel the order
+            trade_plan.order_state = OrderState.CANCELLED
+            return False
+    
+    # Get current candle
+    candle = candles[current_idx]
+    limit_price = trade_plan.entry_price
+    
+    # Check if price touched the limit
+    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    touched = False
+    
+    if is_long:
+        # Long: fills if low <= limit
+        touched = candle['low'] <= limit_price
+    else:
+        # Short: fills if high >= limit
+        touched = candle['high'] >= limit_price
+    
+    if touched:
+        # Order is filled
+        trade_plan.order_state = OrderState.FILLED
+        trade_plan.filled_at_idx = current_idx
+        
+        # Calculate actual entry price with slippage
+        # Slippage works against us: longs pay more, shorts receive less
+        slippage_amount = (limit_price * parameters.slippage_bps) / 10000.0
+        
+        if is_long:
+            actual_price = limit_price + slippage_amount
+        else:
+            actual_price = limit_price - slippage_amount
+        
+        trade_plan.actual_entry_price = actual_price
+        
+        # Calculate entry costs (fees + slippage)
+        trade_plan.entry_cost = calculate_trading_costs(
+            actual_price,
+            trade_plan.position_size,
+            parameters.fees_bps,
+            parameters.slippage_bps
+        )
+        
+        return True
+    
+    return False
+
+
+def calculate_pnl_with_costs(
+    trade_plan: TradePlan,
+    exit_price: float,
+    parameters: SupplyDemandParameters
+) -> float:
+    """Calculate profit/loss including all trading costs
+    
+    Args:
+        trade_plan: Trade plan with filled order
+        exit_price: Exit price
+        parameters: Strategy parameters
+    
+    Returns:
+        Net profit/loss in dollars
+    
+    Formula:
+        For long: PnL = (exit_price - actual_entry_price) * position_size - entry_cost - exit_cost
+        For short: PnL = (actual_entry_price - exit_price) * position_size - entry_cost - exit_cost
+    """
+    if trade_plan.order_state != OrderState.FILLED or trade_plan.actual_entry_price is None:
+        return 0.0
+    
+    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    
+    # Calculate exit cost
+    exit_cost = calculate_trading_costs(
+        exit_price,
+        trade_plan.position_size,
+        parameters.fees_bps,
+        parameters.slippage_bps
+    )
+    
+    # Calculate gross PnL
+    if is_long:
+        gross_pnl = (exit_price - trade_plan.actual_entry_price) * trade_plan.position_size
+    else:
+        gross_pnl = (trade_plan.actual_entry_price - exit_price) * trade_plan.position_size
+    
+    # Subtract costs
+    net_pnl = gross_pnl - trade_plan.entry_cost - exit_cost
+    
+    return net_pnl
