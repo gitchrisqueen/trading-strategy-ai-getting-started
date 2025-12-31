@@ -4,7 +4,7 @@
 
 ### For Learning the Supply & Demand V1 Strategy
 
-1. **Notebook**: `notebooks/supply_demand_v1_backtest.ipynb`
+1. **Notebook**: `notebooks/supply_demand/supply_demand_v1_backtest.ipynb`
    - Interactive demo of the S&D strategy with synthetic data
    - Shows zone detection, scoring, trade generation, and performance metrics
 
@@ -49,28 +49,29 @@ Contains Jupyter notebooks demonstrating backtests and research.
 **Structure**:
 ```
 notebooks/
-├── supply_demand_v1_backtest.ipynb  ← Supply & Demand V1 strategy demo
-├── supply_demand_v1_backtest.html   HTML export of notebook
-├── single-backtest/                 Single-strategy backtest examples
-│   ├── bitcoin-ma.ipynb             Simple MA crossover (BTC)
-│   ├── eth-10-days-high.ipynb       Rolling maximum strategy
-│   ├── moving-average.ipynb         Fast/slow EMA crossover
-│   ├── matic-breakout.ipynb         RSI + Bollinger Bands breakout
-│   ├── bitcoin-atr-breakout.ipynb   ATR-based breakout with regime filter
-│   ├── multipair-atr-breakout.ipynb Multiple pairs ATR breakout
-│   ├── portfolio-construction.ipynb Portfolio rebalancing example
-│   ├── momentum-basket.ipynb        Open-ended momentum basket
-│   └── ...                          Additional examples
-├── grid-search/                     Parameter optimization examples
+├── supply_demand/                     Supply & Demand strategy notebooks
+│   ├── supply_demand_v1_backtest.ipynb  ← S&D V1 strategy demo
+│   └── supply_demand_v1_backtest.html   HTML export of notebook
+├── single-backtest/                   Single-strategy backtest examples
+│   ├── bitcoin-ma.ipynb               Simple MA crossover (BTC)
+│   ├── eth-10-days-high.ipynb         Rolling maximum strategy
+│   ├── moving-average.ipynb           Fast/slow EMA crossover
+│   ├── matic-breakout.ipynb           RSI + Bollinger Bands breakout
+│   ├── bitcoin-atr-breakout.ipynb     ATR-based breakout with regime filter
+│   ├── multipair-atr-breakout.ipynb   Multiple pairs ATR breakout
+│   ├── portfolio-construction.ipynb   Portfolio rebalancing example
+│   ├── momentum-basket.ipynb          Open-ended momentum basket
+│   └── ...                            Additional examples
+├── grid-search/                       Parameter optimization examples
 │   ├── multipair-atr-breakout-slow.ipynb  Grid search demo
 │   └── btc-bb-1h-binance-optimiser.ipynb  Gaussian Process optimiser
-├── research/                        Research-only notebooks
+├── research/                          Research-only notebooks
 │   ├── regime-filter-playground.ipynb     ADX regime filter testing
 │   └── regime-filter-optimise.ipynb       Regime filter optimization
-└── liquidity-provision/             Liquidity provision examples
+└── liquidity-provision/               Liquidity provision examples
 ```
 
-**Key file**: `supply_demand_v1_backtest.ipynb`
+**Key file**: `supply_demand/supply_demand_v1_backtest.ipynb`
 - Demonstrates full Supply & Demand V1 backtest
 - Generates synthetic candle data with embedded S&D patterns
 - Runs zone detection, scoring, trade simulation
@@ -138,12 +139,14 @@ Documentation for the repository.
 
 ```
 docs/
-├── PROJECT_CONTEXT.md                  ← You are reading related docs
-├── REPO_MAP.md                         This file
-├── STRATEGY_SUPPLY_DEMAND_V1.md        Complete S&D strategy specification
-├── COPILOT_WORKFLOW.md                 Development workflow for future PRs
-└── TradingStrategySpec.md              Original trading strategy spec
+├── README.md                            Documentation hub with quick links
+├── PROJECT_CONTEXT.md                   ← You are reading related docs
+├── REPO_MAP.md                          This file
+├── COPILOT_WORKFLOW.md                  Development workflow for future PRs
+└── TradingStrategySpec.md               Original trading strategy spec
 ```
+
+**Note**: For strategy specifications, see the individual strategy folders (e.g., `strategies/supply_demand_v1/README.md`).
 
 ### `/scripts/`
 
