@@ -256,8 +256,10 @@ def validate_minimum_r(
     """
     # Get the planned R (not the actual outcome R)
     # The trade dict should contain 'planned_r' for the decision-time R
-    # and 'r_multiple' for the actual outcome R
-    planned_r = trade.get('planned_r') or trade.get('r_multiple')
+    # Fallback to 'r_multiple' if 'planned_r' not present
+    planned_r = trade.get('planned_r')
+    if planned_r is None:
+        planned_r = trade.get('r_multiple')
     
     if planned_r is None:
         return IntegrityViolation(

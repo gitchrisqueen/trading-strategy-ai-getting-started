@@ -191,8 +191,9 @@ class TestRCalculationValidation:
         
         assert violation is not None, "Incorrect R calculation should be flagged"
         assert violation.violation_type == ViolationType.R_CALCULATION_MISMATCH
-        assert "2.5" in violation.reason or "2.50" in violation.reason
-        assert "3.0" in violation.reason or "3.00" in violation.reason
+        # Check details instead of parsing reason string
+        assert violation.details['recorded_r'] == 2.5
+        assert abs(violation.details['expected_r'] - 3.0) < 0.01
     
     def test_r_calculation_short_trade(self):
         """Test R calculation for short trades"""
@@ -285,7 +286,9 @@ class TestMinimumRValidation:
         
         assert violation is not None, "R below minimum should be flagged"
         assert violation.violation_type == ViolationType.INSUFFICIENT_R
-        assert "2.5" in violation.reason or "2.50" in violation.reason
+        # Check details instead of parsing reason string
+        assert violation.details['planned_r'] == 2.5
+        assert violation.details['min_r'] == 3.0
     
     def test_r_missing_field(self):
         """Test that missing R field is flagged"""
