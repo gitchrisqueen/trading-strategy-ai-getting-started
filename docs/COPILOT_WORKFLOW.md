@@ -12,7 +12,7 @@ This document defines the development workflow for future PRs and GitHub Copilot
 2. `docs/REPO_MAP.md` - Repository structure and file organization
 
 **For Supply & Demand V1 work**:
-3. `docs/STRATEGY_SUPPLY_DEMAND_V1.md` - Complete strategy specification
+3. `strategies/supply_demand_v1/README.md` - Complete strategy specification
 
 **Why**: These docs provide the "context pack" that prevents rediscovering project structure and strategy details every time.
 
@@ -93,7 +93,7 @@ This document defines the development workflow for future PRs and GitHub Copilot
    - Remove debug code, print statements, temporary files
 
 2. **Update documentation**
-   - If strategy behavior changed: update `docs/STRATEGY_SUPPLY_DEMAND_V1.md`
+   - If strategy behavior changed: update `strategies/supply_demand_v1/README.md`
    - If new files added: update `docs/REPO_MAP.md`
    - If setup changed: update `docs/PROJECT_CONTEXT.md`
 
@@ -281,7 +281,7 @@ poetry run pytest tests/test_notebooks.py
 
 | Change Type | File to Update |
 |-------------|----------------|
-| New parameters or strategy logic | `docs/STRATEGY_SUPPLY_DEMAND_V1.md` |
+| New parameters or strategy logic | `strategies/supply_demand_v1/README.md` |
 | New files or moved files | `docs/REPO_MAP.md` |
 | Setup/installation changes | `docs/PROJECT_CONTEXT.md` |
 | Workflow changes | `docs/COPILOT_WORKFLOW.md` (this file) |
@@ -302,7 +302,7 @@ poetry run pytest tests/test_notebooks.py
 1. Update `odds_enhancer_score()` in `strategies/supply_demand_v1/strategy.py`
 2. Add parameters to `SupplyDemandParameters` if needed
 3. Add tests in `tests/test_supply_demand_strategy.py`
-4. Update scoring section in `docs/STRATEGY_SUPPLY_DEMAND_V1.md`
+4. Update scoring section in `strategies/supply_demand_v1/README.md`
 5. Run tests and notebook to verify
 
 ### Fixing a Bug
@@ -319,7 +319,7 @@ poetry run pytest tests/test_notebooks.py
 2. Document the parameter with a comment
 3. Use parameter in relevant function
 4. Add test that uses the parameter
-5. Update parameter table in `docs/STRATEGY_SUPPLY_DEMAND_V1.md`
+5. Update parameter table in `strategies/supply_demand_v1/README.md`
 6. Update notebook cell with parameter examples
 
 ### Refactoring Code
@@ -354,7 +354,7 @@ Use clear, imperative commit messages:
 ✅ **Good**:
 - "Add freshness scoring to odds enhancers"
 - "Fix zone detection for edge case with single candle base"
-- "Update STRATEGY_SUPPLY_DEMAND_V1.md with new parameters"
+- "Update strategy README with new parameters"
 
 ❌ **Bad**:
 - "Update file"
@@ -421,7 +421,7 @@ report_progress(
 - **Main README**: `README.md` - setup and examples
 - **Project context**: `docs/PROJECT_CONTEXT.md` - overview
 - **Repo map**: `docs/REPO_MAP.md` - file structure
-- **Strategy spec**: `docs/STRATEGY_SUPPLY_DEMAND_V1.md` - complete strategy
+- **Strategy spec**: `strategies/supply_demand_v1/README.md` - complete strategy
 - **Test files**: `tests/test_supply_demand_*.py` - usage examples
 - **Trading Strategy docs**: https://tradingstrategy.ai/docs/
 
@@ -436,7 +436,7 @@ Here's a complete example of a good PR workflow:
 # Read these files first
 docs/PROJECT_CONTEXT.md
 docs/REPO_MAP.md
-docs/STRATEGY_SUPPLY_DEMAND_V1.md
+strategies/supply_demand_v1/README.md
 ```
 
 **Step 2: Create plan**
@@ -444,7 +444,7 @@ docs/STRATEGY_SUPPLY_DEMAND_V1.md
 - [ ] Add volume_threshold parameter to SupplyDemandParameters
 - [ ] Update odds_enhancer_score() to include volume check
 - [ ] Add tests for volume scoring
-- [ ] Update STRATEGY_SUPPLY_DEMAND_V1.md with volume enhancer docs
+- [ ] Update strategy README with volume enhancer docs
 - [ ] Run full test suite
 - [ ] Test notebook with new parameter
 ```
@@ -496,7 +496,7 @@ python run_notebooks.py
 
 **Step 5: Documentation**
 ```markdown
-# Update docs/STRATEGY_SUPPLY_DEMAND_V1.md
+# Update strategies/supply_demand_v1/README.md
 ### 5. Volume (0 / 1 point)
 
 Leg-out volume compared to average volume.

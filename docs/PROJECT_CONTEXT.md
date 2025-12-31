@@ -65,7 +65,7 @@ git clone https://github.com/tradingstrategy-ai/trade-executor.git ../trade-exec
 
 ### Notebook Location
 
-**Primary notebook**: `notebooks/supply_demand_v1_backtest.ipynb`
+**Primary notebook**: `notebooks/supply_demand/supply_demand_v1_backtest.ipynb`
 
 ### Quick Start
 
@@ -75,7 +75,7 @@ git clone https://github.com/tradingstrategy-ai/trade-executor.git ../trade-exec
    jupyter notebook
    ```
 
-2. **Open the notebook**: Navigate to `notebooks/supply_demand_v1_backtest.ipynb`
+2. **Open the notebook**: Navigate to `notebooks/supply_demand/supply_demand_v1_backtest.ipynb`
 
 3. **Configure parameters** in the "Parameters Configuration" cell:
    - Trading pairs (default: `BTC/USDT`, `ETH/USDT`)
@@ -168,7 +168,7 @@ The `supply_demand_v1_backtest.ipynb` notebook generates:
    - Performance summary
 
 2. **HTML export** (if saved):
-   - `notebooks/supply_demand_v1_backtest.html`
+   - `notebooks/supply_demand/supply_demand_v1_backtest.html`
 
 ### Test Reports
 
