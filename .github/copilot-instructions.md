@@ -1,0 +1,15 @@
+# Copilot Instructions
+
+- Scope: Starter kit of trading strategy examples (mostly notebooks). Core S&D logic lives in [strategies/supply_demand_v1/strategy.py](strategies/supply_demand_v1/strategy.py); most notebooks consume that module.
+- Imports and paths: Modules resolve via the package path `strategies.supply_demand_v1`. In notebooks we prepend the repo root to `sys.path`; in terminals run from repo root or set `PYTHONPATH=.` so imports work without relative hacks.
+- Supply & Demand strategy: Uses DBR/RBD detection, freshness tracking, curve (HTF) and trend (ITF) classification, odds enhancer scoring, and trade plan building. Behavior is asserted in [tests/test_supply_demand_zones.py](tests/test_supply_demand_zones.py) and [tests/test_supply_demand_strategy.py](tests/test_supply_demand_strategy.py).
+- Notebooks: Examples live under [notebooks/](notebooks/). The S&D demo is [notebooks/supply_demand_v1_backtest.ipynb](notebooks/supply_demand_v1_backtest.ipynb); it generates synthetic candles and prints summaries (no plots). Grid-search notebooks should be skipped for automated runs.
+- Notebook execution: [run_notebooks.py](run_notebooks.py) executes all notebooks except those containing `perform_grid_search`. [tests/test_notebooks.py](tests/test_notebooks.py) parametrizes `notebooks/single-backtest/*.ipynb` and honors `# @ts skip-test` / `# @ts skip-test-ci` pragmas in code cells.
+- Dependencies & setup: Poetry-managed (Python >=3.11,<=3.12). `trade-executor` is expected as an editable dependency at `../trade-executor` (see [pyproject.toml](pyproject.toml)); helper: `make trade-executor-clone`. Some pins are unusual (e.g., `ipython < 8`).
+- Testing: Use `poetry run pytest`. Tests emphasize deterministic S&D logic—candle classification, zone detection, curve/trend analysis, scoring gates, 3R enforcement, and trade management. Keep calculations deterministic and side-effect free where possible.
+- Conventions: Black/isort with `line-length = 999`; flake8 ignores E203. State mutations are intentional in freshness updates (`is_zone_fresh`).
+- Data contracts: Candle dicts require `open`, `high`, `low`, `close`. Zones must carry proximal/distal, base/legout indices/lengths, freshness counts, and `legout_return`.
+- Trade planning rules: Entry at proximal, stop beyond distal with buffer, enforce minimum `min_reward_risk` (default 3R) before returning a plan; `position_size` uses `risk_pct`. `manage_trade_plan` moves stop to breakeven at `breakeven_at_r` and flags take-profit at `take_profit_at_r`.
+- Multi-timeframe signals: `find_nearest_fresh_zones_htf` sets curve from fresh zones; `trend_direction_itf` uses pivot highs/lows via `detect_pivot_highs_lows`. Preserve these interfaces when extending features.
+- CI/backtests: Runs are headless; prefer stdout summaries over interactive widgets. Guard long grid searches with pragmas so they are skipped in automated runs.
+- Adding strategies/notebooks: Mirror the import pattern, and add focused unit tests before relying on notebooks—the test suite is quicker than full notebook execution.
