@@ -12,6 +12,9 @@
 - This repository contains multiple examples of backtesting  [notebooks](https://tradingstrategy.ai/glossary/jupyter-notebook) to get started 
 - The examples show how to develop and backtest your strategies on both decentralised exchanges and [Binance centralised exchange](https://tradingstrategy.ai/glossary/cex) data
 
+# Table of Contents
+
+- [Documentation Index](#documentation-index)
 - [Prerequisites](#prerequisites)
 - [Development environment options](#development-environment-options)
 - [Example strategies](#example-strategies)
@@ -27,6 +30,17 @@
   * [Visualise indicators](#visualise-indicators)
 - [Learning resources](#learning-resources)
 - [Troubleshooting](#troubleshooting)
+
+# Documentation Index
+
+Comprehensive documentation for this repository:
+
+- **[Project Context](docs/PROJECT_CONTEXT.md)** - Project overview, setup instructions, and where to find key implementations
+- **[Repository Map](docs/REPO_MAP.md)** - Complete map of repo structure with descriptions of key files and folders
+- **[Supply & Demand V1 Strategy](docs/STRATEGY_SUPPLY_DEMAND_V1.md)** - Complete text-only specification of the S&D zone-based trading strategy
+- **[Copilot Workflow Guidelines](docs/COPILOT_WORKFLOW.md)** - Development workflow and PR best practices for future contributions
+
+**New to this repo?** Start with [Project Context](docs/PROJECT_CONTEXT.md) and [Repository Map](docs/REPO_MAP.md) to get oriented.
 
 # Support and social media
 
