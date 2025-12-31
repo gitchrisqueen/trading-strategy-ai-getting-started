@@ -96,22 +96,28 @@ class Zone:
         zone_type: SUPPLY or DEMAND
         proximal: Price level closest to current price (entry reference)
         distal: Price level farthest from current price (stop reference)
+        created_at: Index where zone was created (legout_end_idx)
+        created_time: Optional timestamp when zone was created
         base_start_idx: Index where base begins
         base_end_idx: Index where base ends
         legout_end_idx: Index where leg-out ends
-        touches: Number of times price returned to zone after creation
-        base_candle_count: Number of candles in the base
+        base_len: Number of candles in the base
+        legout_len: Number of candles in the leg-out
+        freshness_touches: Number of times price returned to zone after creation
         legout_return: Percentage return of the leg-out move
         is_fresh: Whether zone has not been revisited
     """
     zone_type: ZoneType
     proximal: float
     distal: float
+    created_at: int
     base_start_idx: int
     base_end_idx: int
     legout_end_idx: int
-    touches: int = 0
-    base_candle_count: int = 0
+    base_len: int
+    legout_len: int
+    created_time: Optional[Any] = None
+    freshness_touches: int = 0
     legout_return: float = 0.0
     is_fresh: bool = True
 
@@ -243,7 +249,7 @@ def identify_boring_candles(
     A boring candle indicates supply/demand balance and potential accumulation.
     
     Args:
-        candles: OHLC candle data
+        candles: OHLC candle data (list of dicts or DataFrame)
         body_ratio: Maximum body-to-range ratio for boring classification
     
     Returns:
@@ -253,15 +259,17 @@ def identify_boring_candles(
         body <= body_ratio * range, where:
         - body = abs(close - open)
         - range = high - low
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement boring candle detection
-    # - Calculate body = abs(close - open)
-    # - Calculate range = high - low
-    # - Return body <= body_ratio * range
-    raise NotImplementedError("Boring candle identification to be implemented")
+    result = []
+    for candle in candles:
+        body, range_val = calculate_body_and_range(candle)
+        # Avoid division by zero for doji candles with no range
+        if range_val == 0:
+            is_boring = True  # Treat as boring if no range
+        else:
+            is_boring = body <= body_ratio * range_val
+        result.append(is_boring)
+    return result
 
 
 def identify_exciting_candles(
@@ -273,7 +281,7 @@ def identify_exciting_candles(
     An exciting candle indicates strong imbalance and institutional activity.
     
     Args:
-        candles: OHLC candle data
+        candles: OHLC candle data (list of dicts or DataFrame)
         body_ratio: Minimum body-to-range ratio for exciting classification
     
     Returns:
@@ -281,15 +289,17 @@ def identify_exciting_candles(
     
     Rule:
         body > body_ratio * range
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement exciting candle detection
-    # - Calculate body = abs(close - open)
-    # - Calculate range = high - low
-    # - Return body > body_ratio * range
-    raise NotImplementedError("Exciting candle identification to be implemented")
+    result = []
+    for candle in candles:
+        body, range_val = calculate_body_and_range(candle)
+        # Avoid division by zero for doji candles with no range
+        if range_val == 0:
+            is_exciting = False  # Treat as not exciting if no range
+        else:
+            is_exciting = body > body_ratio * range_val
+        result.append(is_exciting)
+    return result
 
 
 # ============================================================================
@@ -308,22 +318,150 @@ def detect_zones_dbr_rbd(
     3. Leg-Out: Exciting move out of the base
     
     Args:
-        candles: OHLC candle data
+        candles: OHLC candle data (list of dicts with 'open', 'high', 'low', 'close')
         parameters: Strategy parameters for zone detection
     
     Returns:
         List of detected zones (both supply and demand)
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement zone detection
-    # 1. Classify candles as boring or exciting
-    # 2. Scan for patterns: exciting -> boring(s) -> exciting
-    # 3. Validate base duration (min/max candles)
-    # 4. Create Zone objects with proximal/distal lines
-    # 5. Track leg-out characteristics for scoring
-    raise NotImplementedError("Zone detection to be implemented")
+    if len(candles) < 3:
+        return []
+    
+    # Classify all candles
+    boring = identify_boring_candles(candles, parameters.boring_body_ratio)
+    exciting = identify_exciting_candles(candles, parameters.exciting_body_ratio)
+    
+    zones = []
+    i = 0
+    
+    while i < len(candles) - 2:
+        # Look for pattern: exciting -> boring(s) -> exciting
+        if not exciting[i]:
+            i += 1
+            continue
+        
+        # Found potential leg-in (exciting candle)
+        legin_idx = i
+        
+        # Check for base (boring candles)
+        base_start = i + 1
+        base_end = base_start
+        
+        # Scan for consecutive boring candles
+        while base_end < len(candles) and boring[base_end]:
+            base_end += 1
+        
+        base_len = base_end - base_start
+        
+        # Validate base length
+        if base_len < parameters.min_base_candles:
+            i += 1
+            continue
+        
+        # Check for leg-out (exciting candles after base)
+        legout_start = base_end
+        legout_end = legout_start
+        
+        # Scan for consecutive exciting candles that move in the same direction
+        # Get the first leg-out candle to determine direction
+        if legout_start >= len(candles) or not exciting[legout_start]:
+            i += 1
+            continue
+        
+        first_legout = candles[legout_start]
+        first_legout_direction = first_legout['close'] - first_legout['open']  # Positive = bullish, negative = bearish
+        
+        # Scan for consecutive exciting candles moving in same direction
+        while legout_end < len(candles) and exciting[legout_end]:
+            candle = candles[legout_end]
+            candle_direction = candle['close'] - candle['open']
+            
+            # Check if candle moves in the same direction as first leg-out candle
+            # (both positive or both negative)
+            if (first_legout_direction > 0 and candle_direction > 0) or \
+               (first_legout_direction < 0 and candle_direction < 0):
+                legout_end += 1
+            else:
+                # Direction changed, stop leg-out here
+                break
+        
+        legout_len = legout_end - legout_start
+        
+        # Validate leg-out
+        if legout_len < parameters.min_legout_candles:
+            i += 1
+            continue
+        
+        # We have a valid pattern, now determine if it's DBR or RBD
+        # DBR: price drops (leg-in), consolidates (base), then rallies (leg-out)
+        # RBD: price rallies (leg-in), consolidates (base), then drops (leg-out)
+        
+        legin_candle = candles[legin_idx]
+        legout_first_candle = candles[legout_start]
+        legout_last_candle = candles[legout_end - 1]
+        
+        # Determine direction by comparing leg-in and leg-out movements
+        legin_close = legin_candle['close']
+        legin_open = legin_candle['open']
+        base_first = candles[base_start]
+        base_last = candles[base_end - 1]
+        
+        # Get base average level
+        base_level = (base_first['close'] + base_last['close']) / 2
+        
+        # Calculate movements
+        legin_move = legin_close - legin_open  # Positive = bullish, negative = bearish
+        legout_close = legout_last_candle['close']
+        legout_open = legout_first_candle['open']
+        legout_move = legout_close - legout_open  # Positive = bullish, negative = bearish
+        
+        # DBR: bearish leg-in (negative), bullish leg-out (positive)
+        # RBD: bullish leg-in (positive), bearish leg-out (negative)
+        is_dbr = legin_move < 0 and legout_move > 0
+        is_rbd = legin_move > 0 and legout_move < 0
+        
+        if not (is_dbr or is_rbd):
+            i += 1
+            continue
+        
+        zone_type = ZoneType.DEMAND if is_dbr else ZoneType.SUPPLY
+        
+        # Compute proximal and distal lines
+        zone_pattern = (legin_idx, base_end - 1, legout_end - 1)
+        proximal, distal = compute_zone_lines_proximal_distal(
+            zone_pattern, candles, zone_type, parameters.proximal_mode
+        )
+        
+        # Calculate leg-out return (use open to close of leg-out)
+        legout_start_price = legout_first_candle['open']
+        legout_end_price = legout_last_candle['close']
+        if legout_start_price != 0:
+            legout_return = abs(legout_end_price - legout_start_price) / legout_start_price
+        else:
+            legout_return = 0.0
+        
+        # Create zone object
+        zone = Zone(
+            zone_type=zone_type,
+            proximal=proximal,
+            distal=distal,
+            created_at=legout_end - 1,
+            base_start_idx=base_start,
+            base_end_idx=base_end - 1,
+            legout_end_idx=legout_end - 1,
+            base_len=base_len,
+            legout_len=legout_len,
+            freshness_touches=0,
+            legout_return=legout_return,
+            is_fresh=True
+        )
+        
+        zones.append(zone)
+        
+        # Move past this pattern to look for next zone
+        i = legout_end
+    
+    return zones
 
 
 def compute_zone_lines_proximal_distal(
@@ -336,7 +474,7 @@ def compute_zone_lines_proximal_distal(
     
     Args:
         zone_pattern: Tuple of (legin_end, base_end, legout_end) indices
-        candles: OHLC candle data
+        candles: OHLC candle data (list of dicts)
         zone_type: SUPPLY or DEMAND
         proximal_mode: "body" or "wick" for proximal placement
     
@@ -351,16 +489,45 @@ def compute_zone_lines_proximal_distal(
         Supply (RBD):
         - Proximal: Lowest candle body in base
         - Distal: Highest wick across entire pattern
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement zone line calculation
-    # - Extract base candles
-    # - Find highest/lowest body in base (depending on zone type)
-    # - Find highest/lowest wick across full pattern
-    # - Apply proximal_mode logic
-    raise NotImplementedError("Zone line calculation to be implemented")
+    legin_start, base_end, legout_end = zone_pattern
+    
+    # Extract base candles (from start of base to end of base)
+    base_start = legin_start + 1
+    base_candles = candles[base_start:base_end + 1]
+    
+    # Extract full pattern for distal calculation
+    # Pattern starts at some point before base (leg-in), includes base and leg-out
+    # For simplicity, we'll use the entire zone structure available
+    full_pattern = candles[legin_start:legout_end + 1]
+    
+    if zone_type == ZoneType.DEMAND:
+        # DBR: Drop-Base-Rally
+        # Proximal: Highest candle body in base
+        if proximal_mode == "body":
+            # Get the highest body top in base
+            proximal = max(max(c['open'], c['close']) for c in base_candles)
+        else:  # wick mode
+            # Get the highest high in base
+            proximal = max(c['high'] for c in base_candles)
+        
+        # Distal: Lowest low across full structure
+        distal = min(c['low'] for c in full_pattern)
+        
+    else:  # SUPPLY
+        # RBD: Rally-Base-Drop
+        # Proximal: Lowest candle body in base
+        if proximal_mode == "body":
+            # Get the lowest body bottom in base
+            proximal = min(min(c['open'], c['close']) for c in base_candles)
+        else:  # wick mode
+            # Get the lowest low in base
+            proximal = min(c['low'] for c in base_candles)
+        
+        # Distal: Highest high across full structure
+        distal = max(c['high'] for c in full_pattern)
+    
+    return proximal, distal
 
 
 def is_zone_fresh(
@@ -372,7 +539,7 @@ def is_zone_fresh(
     
     Args:
         zone: Zone to check
-        candles: OHLC candle data
+        candles: OHLC candle data (list of dicts)
         current_idx: Current candle index
     
     Returns:
@@ -382,15 +549,36 @@ def is_zone_fresh(
         A zone is fresh until any subsequent candle's high/low overlaps
         the zone interval [distal, proximal]
     
-    Note:
-        Business logic to be implemented in future PR.
+    Side effects:
+        Updates zone.freshness_touches counter and zone.is_fresh flag
     """
-    # TODO: Implement freshness check
-    # - Check all candles after zone creation
-    # - For demand: check if any low <= proximal
-    # - For supply: check if any high >= proximal
-    # - Update zone.touches counter
-    raise NotImplementedError("Zone freshness check to be implemented")
+    # Check all candles after zone creation up to current
+    touches = 0
+    
+    # Define zone bounds
+    if zone.zone_type == ZoneType.DEMAND:
+        # For demand zones: proximal is top, distal is bottom
+        zone_top = zone.proximal
+        zone_bottom = zone.distal
+    else:  # SUPPLY
+        # For supply zones: proximal is bottom, distal is top
+        zone_top = zone.distal
+        zone_bottom = zone.proximal
+    
+    # Check candles after zone creation
+    for i in range(zone.created_at + 1, min(current_idx + 1, len(candles))):
+        candle = candles[i]
+        
+        # Check if candle overlaps the zone
+        # Overlap occurs if candle's low is below zone top AND candle's high is above zone bottom
+        if candle['low'] <= zone_top and candle['high'] >= zone_bottom:
+            touches += 1
+    
+    # Update zone attributes
+    zone.freshness_touches = touches
+    zone.is_fresh = (touches == 0)
+    
+    return zone.is_fresh
 
 
 # ============================================================================
@@ -687,7 +875,7 @@ def calculate_body_and_range(
     """Calculate candle body and range
     
     Args:
-        candle: Single OHLC candle
+        candle: Single OHLC candle with 'open', 'close', 'high', 'low' attributes
     
     Returns:
         Tuple of (body, range)
@@ -695,12 +883,10 @@ def calculate_body_and_range(
     Formula:
         body = abs(close - open)
         range = high - low
-    
-    Note:
-        Business logic to be implemented in future PR.
     """
-    # TODO: Implement body/range calculation
-    raise NotImplementedError("Body/range calculation to be implemented")
+    body = abs(candle['close'] - candle['open'])
+    range_val = candle['high'] - candle['low']
+    return body, range_val
 
 
 def detect_pivot_highs_lows(
