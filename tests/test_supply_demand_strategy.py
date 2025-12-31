@@ -493,6 +493,235 @@ class TestTradePlanBuilding:
         expected_stop = 95.0 * (1 - 0.01)  # 94.05
         assert trade_plan.stop_loss < zone.distal, "Stop should be below distal for demand"
         assert abs(trade_plan.stop_loss - expected_stop) < 0.01, f"Expected stop ~{expected_stop}, got {trade_plan.stop_loss}"
+    
+    def test_target_selection_trade_skipped_when_available_r_less_than_3(self):
+        """Test that trade is skipped when available_R < 3.0 with opposing zone (V1 policy)"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        # Opposing zone that provides less than 3R
+        # Entry at 100, Stop at 95, Risk = 5
+        # For 3R, need target at 115
+        # If opposing zone proximal is at 110, available_R = (110-100)/5 = 2.0 < 3.0
+        opposing_zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=110.0,  # Only provides 2R
+            distal=115.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(min_reward_risk=3.0, stop_buffer_pct=0.0)
+        trade_plan = build_trade_plan(
+            zone,
+            current_price=102.0,
+            account_size=10000.0,
+            parameters=params,
+            opposing_zone=opposing_zone
+        )
+        
+        # Should be rejected because available_R = 2.0 < 3.0
+        assert trade_plan is None, "Trade should be skipped when available_R < 3.0"
+    
+    def test_target_selection_trade_allowed_when_available_r_equals_3(self):
+        """Test that trade is allowed when available_R = 3.0 with opposing zone (V1 policy)"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        # Opposing zone that provides exactly 3R
+        # Entry at 100, Stop at 95, Risk = 5
+        # For 3R, need target at 115
+        # If opposing zone proximal is at 115, available_R = (115-100)/5 = 3.0
+        opposing_zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=115.0,  # Provides exactly 3R
+            distal=120.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(min_reward_risk=3.0, stop_buffer_pct=0.0)
+        trade_plan = build_trade_plan(
+            zone,
+            current_price=102.0,
+            account_size=10000.0,
+            parameters=params,
+            opposing_zone=opposing_zone
+        )
+        
+        # Should be accepted because available_R = 3.0
+        assert trade_plan is not None, "Trade should be allowed when available_R >= 3.0"
+        assert trade_plan.r_multiple >= 3.0, f"R multiple should be >= 3.0, got {trade_plan.r_multiple}"
+        # V1 Policy: Target should be at opposing zone proximal
+        assert trade_plan.take_profit == 115.0, f"Target should be at opposing zone proximal (115.0), got {trade_plan.take_profit}"
+    
+    def test_target_selection_trade_allowed_when_available_r_greater_than_3(self):
+        """Test that trade is allowed when available_R > 3.0 with opposing zone (V1 policy)"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        # Opposing zone that provides more than 3R
+        # Entry at 100, Stop at 95, Risk = 5
+        # For 3R, need target at 115
+        # If opposing zone proximal is at 120, available_R = (120-100)/5 = 4.0 > 3.0
+        opposing_zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=120.0,  # Provides 4R
+            distal=125.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(min_reward_risk=3.0, stop_buffer_pct=0.0)
+        trade_plan = build_trade_plan(
+            zone,
+            current_price=102.0,
+            account_size=10000.0,
+            parameters=params,
+            opposing_zone=opposing_zone
+        )
+        
+        # Should be accepted because available_R = 4.0 > 3.0
+        assert trade_plan is not None, "Trade should be allowed when available_R > 3.0"
+        assert trade_plan.r_multiple >= 3.0, f"R multiple should be >= 3.0, got {trade_plan.r_multiple}"
+        # V1 Policy: Target should be at opposing zone proximal
+        assert trade_plan.take_profit == 120.0, f"Target should be at opposing zone proximal (120.0), got {trade_plan.take_profit}"
+    
+    def test_target_selection_short_trade_skipped_when_available_r_less_than_3(self):
+        """Test that short trade is skipped when available_R < 3.0 with opposing zone (V1 policy)"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        # Opposing zone that provides less than 3R for short
+        # Entry at 100, Stop at 105, Risk = 5
+        # For 3R, need target at 85
+        # If opposing zone proximal is at 90, available_R = (100-90)/5 = 2.0 < 3.0
+        opposing_zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=90.0,  # Only provides 2R for short
+            distal=85.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(min_reward_risk=3.0, stop_buffer_pct=0.0)
+        trade_plan = build_trade_plan(
+            zone,
+            current_price=98.0,
+            account_size=10000.0,
+            parameters=params,
+            opposing_zone=opposing_zone
+        )
+        
+        # Should be rejected because available_R = 2.0 < 3.0
+        assert trade_plan is None, "Short trade should be skipped when available_R < 3.0"
+    
+    def test_target_selection_short_trade_allowed_when_available_r_equals_3(self):
+        """Test that short trade is allowed when available_R = 3.0 with opposing zone (V1 policy)"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        # Opposing zone that provides exactly 3R for short
+        # Entry at 100, Stop at 105, Risk = 5
+        # For 3R, need target at 85
+        # If opposing zone proximal is at 85, available_R = (100-85)/5 = 3.0
+        opposing_zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=85.0,  # Provides exactly 3R for short
+            distal=80.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(min_reward_risk=3.0, stop_buffer_pct=0.0)
+        trade_plan = build_trade_plan(
+            zone,
+            current_price=98.0,
+            account_size=10000.0,
+            parameters=params,
+            opposing_zone=opposing_zone
+        )
+        
+        # Should be accepted because available_R = 3.0
+        assert trade_plan is not None, "Short trade should be allowed when available_R >= 3.0"
+        assert trade_plan.r_multiple >= 3.0, f"R multiple should be >= 3.0, got {trade_plan.r_multiple}"
+        # V1 Policy: Target should be at opposing zone proximal
+        assert trade_plan.take_profit == 85.0, f"Target should be at opposing zone proximal (85.0), got {trade_plan.take_profit}"
 
 
 class TestPositionSizing:
