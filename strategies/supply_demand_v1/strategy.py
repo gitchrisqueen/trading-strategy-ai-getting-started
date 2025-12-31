@@ -933,10 +933,11 @@ def build_trade_plan(
     Returns:
         TradePlan object or None if plan is invalid
     
-    Rules:
+    Rules (V1 Policy):
         - Entry: At proximal line (limit order)
         - Stop: Beyond distal line (with buffer)
-        - Target: Minimum 3R, before opposing zone
+        - Target: Opposing zone proximal if available_R >= 3.0, else skip trade
+        - If no opposing zone: Minimum 3R target
         - Position size: 2% risk rule
     """
     # Entry at proximal line
@@ -958,51 +959,40 @@ def build_trade_plan(
     if risk <= 0:
         return None  # Invalid trade plan
     
-    # Calculate minimum 3R target
-    min_target_distance = risk * parameters.min_reward_risk
-    
-    if zone.zone_type == ZoneType.DEMAND:
-        # Long: target above entry
-        min_take_profit = entry_price + min_target_distance
-    else:
-        # Short: target below entry
-        min_take_profit = entry_price - min_target_distance
-    
-    # Adjust target based on opposing zone if available
-    take_profit = min_take_profit
-    
+    # V1 Policy: Check available R to opposing zone first
     if opposing_zone is not None:
-        # Target at opposing zone proximal, but never beyond
-        opposing_proximal = opposing_zone.proximal
-        
+        # Calculate available R to opposing zone proximal
         if zone.zone_type == ZoneType.DEMAND:
             # Long: opposing zone is supply above
-            # Target at max(3R, opposing_proximal), but never beyond opposing distal
-            opposing_target = opposing_proximal
-            
-            # Ensure we don't go beyond opposing zone
-            if opposing_target > opposing_zone.distal:
-                opposing_target = opposing_zone.distal
-            
-            # Use the minimum of 3R target and opposing zone
-            take_profit = min(max(min_take_profit, opposing_target), opposing_zone.distal)
+            max_reward = abs(opposing_zone.proximal - entry_price)
         else:
             # Short: opposing zone is demand below
-            # Target at max(3R, opposing_proximal), but never beyond opposing distal
-            opposing_target = opposing_proximal
-            
-            # Ensure we don't go beyond opposing zone
-            if opposing_target < opposing_zone.distal:
-                opposing_target = opposing_zone.distal
-            
-            # Use the maximum of 3R target and opposing zone
-            take_profit = max(min(min_take_profit, opposing_target), opposing_zone.distal)
+            max_reward = abs(entry_price - opposing_zone.proximal)
+        
+        available_r = max_reward / risk
+        
+        # V1 Policy: Skip trade if available_R < 3.0
+        if available_r < parameters.min_reward_risk:
+            return None  # Insufficient R available to opposing zone
+        
+        # V1 Policy: Target at opposing zone proximal (available_R >= 3.0)
+        take_profit = opposing_zone.proximal
+    else:
+        # No opposing zone: use minimum 3R target
+        min_target_distance = risk * parameters.min_reward_risk
+        
+        if zone.zone_type == ZoneType.DEMAND:
+            # Long: target above entry
+            take_profit = entry_price + min_target_distance
+        else:
+            # Short: target below entry
+            take_profit = entry_price - min_target_distance
     
     # Calculate R multiple for this target
     reward = abs(take_profit - entry_price)
     r_multiple = reward / risk
     
-    # Enforce minimum 3R requirement
+    # Enforce minimum 3R requirement (should always pass given logic above)
     if r_multiple < parameters.min_reward_risk:
         return None  # Does not meet minimum R:R
     
