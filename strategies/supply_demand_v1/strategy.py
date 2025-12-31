@@ -92,6 +92,11 @@ class SupplyDemandParameters:
     pivot_len: int = 5  # Lookback period for pivot detection
     pivots_to_consider: int = 4  # Number of pivots to analyze for trend
     
+    # Multi-Timeframe Gating (Curve + Trend)
+    allow_eq_trades: bool = True  # Allow trades when curve is in EQUILIBRIUM
+    eq_requires_trend_alignment: bool = True  # Require trend alignment for EQ trades
+    eq_min_setup_score_bonus: float = 1.0  # Bonus score required for EQ trades
+    
     # Entry Mode
     entry_mode: EntryMode = EntryMode.LIMIT  # LIMIT or CONFIRMATION
     
@@ -808,6 +813,269 @@ def trend_direction_itf(
     # Sideways: Mixed signals
     else:
         return TrendDirection.SIDEWAYS
+
+
+def find_nearest_fresh_supply_above(
+    current_price: float,
+    zones_htf: List[Zone]
+) -> Optional[Zone]:
+    """Find the nearest fresh supply zone above current price
+    
+    Args:
+        current_price: Current price
+        zones_htf: List of zones detected on HTF (should include freshness updates)
+    
+    Returns:
+        Nearest fresh supply zone above price, or None if not found
+    """
+    supply_above = None
+    min_distance = float('inf')
+    
+    for zone in zones_htf:
+        if zone.zone_type == ZoneType.SUPPLY and zone.is_fresh:
+            # For supply zones, proximal is the lower boundary
+            if zone.proximal > current_price:
+                distance = zone.proximal - current_price
+                if distance < min_distance:
+                    min_distance = distance
+                    supply_above = zone
+    
+    return supply_above
+
+
+def find_nearest_fresh_demand_below(
+    current_price: float,
+    zones_htf: List[Zone]
+) -> Optional[Zone]:
+    """Find the nearest fresh demand zone below current price
+    
+    Args:
+        current_price: Current price
+        zones_htf: List of zones detected on HTF (should include freshness updates)
+    
+    Returns:
+        Nearest fresh demand zone below price, or None if not found
+    """
+    demand_below = None
+    min_distance = float('inf')
+    
+    for zone in zones_htf:
+        if zone.zone_type == ZoneType.DEMAND and zone.is_fresh:
+            # For demand zones, proximal is the upper boundary
+            if zone.proximal < current_price:
+                distance = current_price - zone.proximal
+                if distance < min_distance:
+                    min_distance = distance
+                    demand_below = zone
+    
+    return demand_below
+
+
+def classify_curve(
+    current_price: float,
+    supply_proximal: Optional[float],
+    demand_proximal: Optional[float]
+) -> str:
+    """Classify curve location as "LOW", "EQ", or "HIGH"
+    
+    Wrapper around curve_location that returns string values for convenience.
+    
+    Args:
+        current_price: Current price
+        supply_proximal: Proximal line of nearest supply above (or None)
+        demand_proximal: Proximal line of nearest demand below (or None)
+    
+    Returns:
+        "LOW", "EQ", or "HIGH"
+    """
+    # Create mock zones if we have proximal values
+    supply_zone = None
+    demand_zone = None
+    
+    if supply_proximal is not None:
+        supply_zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=supply_proximal,
+            distal=supply_proximal + 1,  # Dummy value
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=0,
+            legout_end_idx=0,
+            base_len=1,
+            legout_len=1,
+            is_fresh=True
+        )
+    
+    if demand_proximal is not None:
+        demand_zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=demand_proximal,
+            distal=demand_proximal - 1,  # Dummy value
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=0,
+            legout_end_idx=0,
+            base_len=1,
+            legout_len=1,
+            is_fresh=True
+        )
+    
+    # Use existing curve_location function
+    loc = curve_location(current_price, supply_zone, demand_zone)
+    
+    # Convert enum to string
+    if loc == CurveLocation.LOW:
+        return "LOW"
+    elif loc == CurveLocation.HIGH:
+        return "HIGH"
+    else:
+        return "EQ"
+
+
+def classify_trend(
+    pivot_highs: List[int],
+    pivot_lows: List[int],
+    candles: Any,
+    pivots_to_consider: int = 4
+) -> str:
+    """Classify trend as "UP", "DOWN", or "SIDEWAYS"
+    
+    Wrapper that analyzes pivot sequences directly.
+    
+    Args:
+        pivot_highs: List of indices where pivot highs occurred
+        pivot_lows: List of indices where pivot lows occurred
+        candles: OHLC candle data
+        pivots_to_consider: Number of recent pivots to analyze
+    
+    Returns:
+        "UP", "DOWN", or "SIDEWAYS"
+    """
+    # Need at least 2 pivots of each type to determine trend
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return "SIDEWAYS"
+    
+    # Get the most recent pivots
+    recent_highs = pivot_highs[-pivots_to_consider:]
+    recent_lows = pivot_lows[-pivots_to_consider:]
+    
+    # Need at least 2 pivots to compare
+    if len(recent_highs) < 2 or len(recent_lows) < 2:
+        return "SIDEWAYS"
+    
+    # Analyze highs: are they making higher highs (HH)?
+    highs_ascending = True
+    for i in range(1, len(recent_highs)):
+        prev_idx = recent_highs[i - 1]
+        curr_idx = recent_highs[i]
+        if candles[curr_idx]['high'] <= candles[prev_idx]['high']:
+            highs_ascending = False
+            break
+    
+    # Analyze highs: are they making lower highs (LH)?
+    highs_descending = True
+    for i in range(1, len(recent_highs)):
+        prev_idx = recent_highs[i - 1]
+        curr_idx = recent_highs[i]
+        if candles[curr_idx]['high'] >= candles[prev_idx]['high']:
+            highs_descending = False
+            break
+    
+    # Analyze lows: are they making higher lows (HL)?
+    lows_ascending = True
+    for i in range(1, len(recent_lows)):
+        prev_idx = recent_lows[i - 1]
+        curr_idx = recent_lows[i]
+        if candles[curr_idx]['low'] <= candles[prev_idx]['low']:
+            lows_ascending = False
+            break
+    
+    # Analyze lows: are they making lower lows (LL)?
+    lows_descending = True
+    for i in range(1, len(recent_lows)):
+        prev_idx = recent_lows[i - 1]
+        curr_idx = recent_lows[i]
+        if candles[curr_idx]['low'] >= candles[prev_idx]['low']:
+            lows_descending = False
+            break
+    
+    # Classify trend
+    # Uptrend: HH and HL
+    if highs_ascending and lows_ascending:
+        return "UP"
+    # Downtrend: LH and LL
+    elif highs_descending and lows_descending:
+        return "DOWN"
+    # Sideways: Mixed signals
+    else:
+        return "SIDEWAYS"
+
+
+def should_allow_trade(
+    zone: Zone,
+    curve_state: str,
+    trend_state: str,
+    base_score: float,
+    parameters: SupplyDemandParameters
+) -> Tuple[bool, float]:
+    """Determine if a trade should be allowed based on curve + trend gating
+    
+    Implements the multi-timeframe gating logic:
+    - LOW curve: favor demand LONGs, restrict supply SHORTs
+    - HIGH curve: favor supply SHORTs, restrict demand LONGs
+    - EQ curve: require trend alignment and higher score threshold
+    
+    Args:
+        zone: Zone to evaluate
+        curve_state: "LOW", "EQ", or "HIGH"
+        trend_state: "UP", "DOWN", or "SIDEWAYS"
+        base_score: Base odds enhancer score before EQ bonus
+        parameters: Strategy parameters
+    
+    Returns:
+        Tuple of (allow_trade: bool, final_score: float)
+    """
+    is_long = zone.zone_type == ZoneType.DEMAND
+    is_short = zone.zone_type == ZoneType.SUPPLY
+    
+    final_score = base_score
+    
+    # Rule 1: LOW curve - allow demand LONGs, restrict supply SHORTs
+    if curve_state == "LOW":
+        if is_short:
+            return False, final_score  # Block supply SHORTs in LOW curve
+        # Allow demand LONGs in LOW curve
+        return True, final_score
+    
+    # Rule 2: HIGH curve - allow supply SHORTs, restrict demand LONGs
+    elif curve_state == "HIGH":
+        if is_long:
+            return False, final_score  # Block demand LONGs in HIGH curve
+        # Allow supply SHORTs in HIGH curve
+        return True, final_score
+    
+    # Rule 3: EQ curve - require trend alignment and higher threshold
+    elif curve_state == "EQ":
+        # Check if EQ trades are allowed at all
+        if not parameters.allow_eq_trades:
+            return False, final_score
+        
+        # Check trend alignment if required
+        if parameters.eq_requires_trend_alignment:
+            # LONG trades require UP trend
+            if is_long and trend_state != "UP":
+                return False, final_score
+            # SHORT trades require DOWN trend
+            if is_short and trend_state != "DOWN":
+                return False, final_score
+        
+        # Apply EQ score bonus requirement
+        final_score = base_score + parameters.eq_min_setup_score_bonus
+        
+        return True, final_score
+    
+    # Default: allow trade
+    return True, final_score
 
 
 # ============================================================================
