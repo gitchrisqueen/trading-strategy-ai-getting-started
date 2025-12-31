@@ -24,7 +24,7 @@ import csv
 import hashlib
 import subprocess
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import random
@@ -61,7 +61,7 @@ from strategies.supply_demand_v1.strategy import (
 from strategies.supply_demand_v1.integrity import (
     validate_no_lookahead,
     validate_entry_after_zone_creation,
-    validate_r_calculation,
+    validate_planned_r_calculation,
     validate_minimum_r,
     IntegrityReport,
     ViolationType,
@@ -160,7 +160,7 @@ def generate_synthetic_candles(
         candles.append(candle)
         
         current_price = close_price
-        timestamp = timestamp.replace(minute=timestamp.minute + 15)  # 15m candles
+        timestamp = timestamp + timedelta(minutes=15)  # 15m candles
     
     return candles
 
@@ -183,14 +183,7 @@ def execute_backtest_for_symbol(
         Tuple of (trades, zones, final_capital)
     """
     # Detect all zones
-    zones = detect_zones_dbr_rbd(
-        candles,
-        min_base=params.min_base_candles,
-        max_base=params.max_base_candles,
-        min_legout=params.min_legout_candles,
-        boring_ratio=params.boring_body_ratio,
-        proximal_mode=params.proximal_mode
-    )
+    zones = detect_zones_dbr_rbd(candles, params)
     
     # Track capital and positions
     capital = initial_capital
@@ -211,10 +204,9 @@ def execute_backtest_for_symbol(
             if plan.order_state == OrderState.PENDING:
                 filled = check_limit_order_fill(
                     plan,
-                    candle,
+                    candles,
                     idx,
-                    params.fees_bps,
-                    params.slippage_bps
+                    params
                 )
                 if filled:
                     plan.order_state = OrderState.FILLED
@@ -248,20 +240,15 @@ def execute_backtest_for_symbol(
             exit_signal = manage_trade_plan(
                 plan,
                 candle['close'],
-                is_long,
-                params.breakeven_at_r,
-                params.take_profit_at_r
+                params
             )
             
             if exit_signal:
                 # Calculate P&L
                 pnl = calculate_pnl_with_costs(
-                    plan.actual_entry_price or plan.entry_price,
+                    plan,
                     candle['close'],
-                    plan.position_size,
-                    is_long,
-                    plan.entry_cost,
-                    plan.exit_cost
+                    params
                 )
                 
                 # Calculate realized R
@@ -301,21 +288,25 @@ def execute_backtest_for_symbol(
         if idx > 100:  # Need some history for HTF/ITF analysis
             for zone in zones:
                 if zone.is_fresh and zone.created_at < idx:
-                    # Score the zone
+                    # Score the zone (simplified - use placeholder curve/trend)
                     score = odds_enhancer_score(
                         zone,
-                        None,  # Simplified: no opposing zone lookup for now
-                        params
+                        candle['close'],
+                        CurveLocation.EQUILIBRIUM,  # Simplified
+                        TrendDirection.SIDEWAYS,     # Simplified
+                        params,
+                        None  # opposing_zone
                     )
                     
                     if score >= params.min_setup_score:
                         # Build trade plan
                         plan = build_trade_plan(
                             zone,
+                            candle['close'],
                             capital,
-                            None,  # opposing_zone simplified
                             params,
-                            candle['close']
+                            None,  # opposing_zone simplified
+                            score
                         )
                         
                         if plan and plan.r_multiple >= params.min_reward_risk:
@@ -504,7 +495,6 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
             # Check minimum R
             violation = validate_minimum_r(
                 trade,
-                trade['planned_R'],
                 params.min_reward_risk
             )
             if violation:
@@ -597,6 +587,17 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
         json.dump(result.run_manifest, f, indent=2)
     
     # Write violations.json
+    # Helper to convert datetime to string for JSON serialization
+    def serialize_for_json(obj):
+        """Convert non-serializable objects to JSON-compatible format"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: serialize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [serialize_for_json(item) for item in obj]
+        return obj
+    
     violations_data = {
         'total_trades': result.integrity_report.total_trades,
         'clean': result.integrity_report.clean,
@@ -605,8 +606,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             {
                 'type': v.violation_type.value,
                 'reason': v.reason,
-                'details': v.details,
-                'trade': v.trade
+                'details': serialize_for_json(v.details),
+                'trade': serialize_for_json(v.trade)
             }
             for v in result.integrity_report.violations
         ]
