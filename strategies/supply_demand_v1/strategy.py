@@ -1327,34 +1327,96 @@ def position_size(
     return pos_size
 
 
+def check_intrabar_exit(
+    trade_plan: TradePlan,
+    candle: Dict[str, Any],
+    parameters: SupplyDemandParameters,
+    stop_wins_on_same_bar: bool = True
+) -> Optional[str]:
+    """Check if position should exit on current candle (stop or target hit)
+    
+    Evaluates intrabar price action to determine if stop loss or take profit
+    target was hit during the candle.
+    
+    Args:
+        trade_plan: Active trade plan with filled order
+        candle: Current OHLC candle
+        parameters: Strategy parameters (not currently used but kept for consistency)
+        stop_wins_on_same_bar: If both stop and target hit on same bar, assume stop wins first
+    
+    Returns:
+        Exit reason string: "STOP", "TARGET", or None if no exit
+    
+    Logic:
+        - Long position:
+          - Stop hit if candle low <= stop_loss
+          - Target hit if candle high >= take_profit
+        - Short position:
+          - Stop hit if candle high >= stop_loss
+          - Target hit if candle low <= take_profit
+        - If both hit on same bar: stop_wins_on_same_bar determines outcome (default: "STOP")
+    """
+    if trade_plan.order_state != OrderState.FILLED:
+        return None
+    
+    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    
+    stop_hit = False
+    target_hit = False
+    
+    if is_long:
+        # Long position
+        stop_hit = candle['low'] <= trade_plan.stop_loss
+        target_hit = candle['high'] >= trade_plan.take_profit
+    else:
+        # Short position
+        stop_hit = candle['high'] >= trade_plan.stop_loss
+        target_hit = candle['low'] <= trade_plan.take_profit
+    
+    # Handle both hit on same bar
+    if stop_hit and target_hit:
+        # Conservative approach: assume stop hit first
+        return "STOP" if stop_wins_on_same_bar else "TARGET"
+    
+    if stop_hit:
+        return "STOP"
+    
+    if target_hit:
+        return "TARGET"
+    
+    return None
+
+
 def manage_trade_plan(
     trade_plan: TradePlan,
     current_price: float,
     parameters: SupplyDemandParameters
 ) -> Dict[str, Any]:
-    """Manage active trade: update stops, take profits
+    """Manage active trade: update stops based on profit levels
     
     Implements Plan #1 (default):
     - At 2R: Move stop to breakeven
-    - At 3R: Take profits (close position)
+    - At 3R: Keep monitoring (exit handled by check_intrabar_exit)
+    
+    Note: This function handles stop management only. Exit detection
+    should use check_intrabar_exit() which checks intrabar stop/target hits.
     
     Args:
         trade_plan: Active trade plan
-        current_price: Current price
+        current_price: Current price (typically close of current candle)
         parameters: Strategy parameters
     
     Returns:
         Dictionary with management actions:
         - "update_stop": New stop price if should be moved
-        - "take_profit": True if should close position
         - "current_r": Current R multiple achieved
     """
     # Determine if long or short
     is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
     
-    # Calculate current R multiple
+    # Calculate current R multiple based on close price
     current_r = calculate_r_multiple(
-        trade_plan.entry_price,
+        trade_plan.actual_entry_price or trade_plan.entry_price,
         current_price,
         trade_plan.stop_loss,
         is_long
@@ -1362,19 +1424,15 @@ def manage_trade_plan(
     
     result = {
         "update_stop": None,
-        "take_profit": False,
         "current_r": current_r
     }
     
-    # Check if we should take profit at target R multiple
-    if current_r >= parameters.take_profit_at_r:
-        result["take_profit"] = True
-        return result
-    
     # Check if we should move stop to breakeven
     if current_r >= parameters.breakeven_at_r:
-        # Move stop to breakeven (entry price)
-        result["update_stop"] = trade_plan.entry_price
+        # Move stop to breakeven (entry price) if not already moved
+        entry_price = trade_plan.actual_entry_price or trade_plan.entry_price
+        if trade_plan.stop_loss != entry_price:
+            result["update_stop"] = entry_price
     
     return result
 

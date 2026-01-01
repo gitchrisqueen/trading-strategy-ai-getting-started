@@ -54,6 +54,7 @@ from strategies.supply_demand_v1.strategy import (
     build_trade_plan,
     should_allow_trade,
     check_limit_order_fill,
+    check_intrabar_exit,
     manage_trade_plan,
     calculate_pnl_with_costs,
 )
@@ -188,7 +189,8 @@ def execute_backtest_for_symbol(
     # Track capital and positions
     capital = initial_capital
     trades = []
-    active_plans = []
+    pending_plans = []  # Plans with pending orders
+    open_positions = []  # Plans with filled orders (active positions)
     
     # Simulate backtest bar by bar
     for idx in range(len(candles)):
@@ -200,8 +202,16 @@ def execute_backtest_for_symbol(
                 is_zone_fresh(zone, candles, idx)
         
         # Check for fills on pending orders
-        for plan in active_plans:
+        for plan in list(pending_plans):
             if plan.order_state == OrderState.PENDING:
+                # Check TTL expiration first
+                if params.ttl_bars and (idx - plan.placed_at_idx) >= params.ttl_bars:
+                    plan.order_state = OrderState.CANCELLED
+                    pending_plans.remove(plan)
+                    # Note: TTL cancellation doesn't create a trade record (never filled)
+                    continue
+                
+                # Check for fill
                 filled = check_limit_order_fill(
                     plan,
                     candles,
@@ -211,7 +221,12 @@ def execute_backtest_for_symbol(
                 if filled:
                     plan.order_state = OrderState.FILLED
                     plan.filled_at_idx = idx
-                    # Track entry
+                    
+                    # Move from pending to open positions
+                    pending_plans.remove(plan)
+                    open_positions.append(plan)
+                    
+                    # Create trade record (entry)
                     trades.append({
                         'symbol': symbol,
                         'side': 'LONG' if plan.zone.zone_type == ZoneType.DEMAND else 'SHORT',
@@ -219,6 +234,7 @@ def execute_backtest_for_symbol(
                         'stop': plan.stop_loss,
                         'target': plan.take_profit,
                         'planned_R': plan.r_multiple,
+                        'planned_r': plan.r_multiple,  # Add lowercase for integrity validation
                         'realized_R': None,  # Will be filled on exit
                         'entry_time': candle.get('timestamp'),
                         'entry_idx': idx,
@@ -230,24 +246,35 @@ def execute_backtest_for_symbol(
                         'trend_state': None,  # Simplified for now
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
+                        'position_size': plan.position_size,
                     })
         
-        # Check for exits on filled orders
-        filled_plans = [p for p in active_plans if p.order_state == OrderState.FILLED]
-        for plan in filled_plans:
-            # Manage trade (check for stops/targets)
+        # Check for exits on open positions
+        for plan in list(open_positions):
             is_long = plan.zone.zone_type == ZoneType.DEMAND
-            exit_signal = manage_trade_plan(
+            
+            # Check for intrabar stop or target hit
+            exit_reason = check_intrabar_exit(
                 plan,
-                candle['close'],
-                params
+                candle,
+                params,
+                stop_wins_on_same_bar=True  # Conservative: stop wins if both hit
             )
             
-            if exit_signal:
+            if exit_reason:
+                # Determine exit price based on reason
+                if exit_reason == "STOP":
+                    exit_price = plan.stop_loss
+                elif exit_reason == "TARGET":
+                    exit_price = plan.take_profit
+                else:
+                    # Shouldn't happen with current logic
+                    exit_price = candle['close']
+                
                 # Calculate P&L
                 pnl = calculate_pnl_with_costs(
                     plan,
-                    candle['close'],
+                    exit_price,
                     params
                 )
                 
@@ -256,38 +283,50 @@ def execute_backtest_for_symbol(
                 stop = plan.stop_loss
                 risk = abs(entry - stop)
                 if is_long:
-                    realized_r = (candle['close'] - entry) / risk if risk > 0 else 0
+                    realized_r = (exit_price - entry) / risk if risk > 0 else 0
                 else:
-                    realized_r = (entry - candle['close']) / risk if risk > 0 else 0
+                    realized_r = (entry - exit_price) / risk if risk > 0 else 0
                 
                 # Update trade record
                 for trade in trades:
                     if (trade['entry_idx'] == plan.filled_at_idx and 
-                        trade['symbol'] == symbol):
+                        trade['symbol'] == symbol and
+                        trade['exit_idx'] is None):  # Find the unfilled trade
                         trade['realized_R'] = realized_r
                         trade['exit_time'] = candle.get('timestamp')
                         trade['exit_idx'] = idx
-                        trade['exit_reason'] = exit_signal
+                        trade['exit_reason'] = exit_reason
                         trade['pnl'] = pnl
                         break
                 
                 # Update capital
                 capital += pnl
                 
-                # Remove from active plans
-                active_plans.remove(plan)
-        
-        # Cancel expired orders
-        for plan in list(active_plans):
-            if plan.order_state == OrderState.PENDING:
-                if params.ttl_bars and (idx - plan.placed_at_idx) > params.ttl_bars:
-                    plan.order_state = OrderState.CANCELLED
-                    active_plans.remove(plan)
+                # Remove from open positions
+                open_positions.remove(plan)
+            else:
+                # No exit, manage trade (update stops if needed)
+                management = manage_trade_plan(
+                    plan,
+                    candle['close'],
+                    params
+                )
+                
+                # Update stop if breakeven move triggered
+                if management.get("update_stop") is not None:
+                    plan.stop_loss = management["update_stop"]
         
         # Look for new setups (simplified - only check fresh zones)
         if idx > 100:  # Need some history for HTF/ITF analysis
             for zone in zones:
                 if zone.is_fresh and zone.created_at < idx:
+                    # Check if we already have a pending order or position for this zone
+                    zone_already_traded = any(
+                        p.zone == zone for p in pending_plans + open_positions
+                    )
+                    if zone_already_traded:
+                        continue
+                    
                     # Score the zone (simplified - use placeholder curve/trend)
                     score = odds_enhancer_score(
                         zone,
@@ -311,7 +350,36 @@ def execute_backtest_for_symbol(
                         
                         if plan and plan.r_multiple >= params.min_reward_risk:
                             plan.placed_at_idx = idx
-                            active_plans.append(plan)
+                            pending_plans.append(plan)
+    
+    # Close any remaining open positions at EOD (end of data)
+    for plan in open_positions:
+        is_long = plan.zone.zone_type == ZoneType.DEMAND
+        exit_price = candles[-1]['close']
+        
+        pnl = calculate_pnl_with_costs(plan, exit_price, params)
+        
+        entry = plan.actual_entry_price or plan.entry_price
+        stop = plan.stop_loss
+        risk = abs(entry - stop)
+        if is_long:
+            realized_r = (exit_price - entry) / risk if risk > 0 else 0
+        else:
+            realized_r = (entry - exit_price) / risk if risk > 0 else 0
+        
+        # Update trade record
+        for trade in trades:
+            if (trade['entry_idx'] == plan.filled_at_idx and 
+                trade['symbol'] == symbol and
+                trade['exit_idx'] is None):
+                trade['realized_R'] = realized_r
+                trade['exit_time'] = candles[-1].get('timestamp')
+                trade['exit_idx'] = len(candles) - 1
+                trade['exit_reason'] = 'EOD_CLOSE'
+                trade['pnl'] = pnl
+                break
+        
+        capital += pnl
     
     # Convert zones to dicts for output
     zone_dicts = []

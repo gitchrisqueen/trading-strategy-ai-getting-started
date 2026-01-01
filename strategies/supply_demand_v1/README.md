@@ -403,6 +403,38 @@ Default buffer: `stop_buffer_pct = 0.001` (0.1%)
 
 ## Take Profit and Trade Management
 
+### Exit Detection and Lifecycle
+
+Positions are simulated across multiple bars from entry to exit. On each bar after entry, the backtest engine checks for exit conditions using **intrabar price action** (candle high/low).
+
+#### Exit Reasons
+
+| Exit Reason | Description |
+|-------------|-------------|
+| **STOP** | Stop loss was hit (long: candle low ≤ stop, short: candle high ≥ stop) |
+| **TARGET** | Take profit target was hit (long: candle high ≥ target, short: candle low ≤ target) |
+| **EOD_CLOSE** | Position still open at end of data (closed at final candle close) |
+| **TTL_CANCEL** | Limit order expired before fill (TTL = Time To Live) |
+
+#### Same-Bar Stop and Target Rule
+
+If both stop and target are hit within the same candle (wide-ranging bar), the backtest uses a **conservative approach**:
+
+**Default Rule**: Assume **STOP hits first**
+
+This is configurable via `stop_wins_on_same_bar` parameter in `check_intrabar_exit()`.
+
+**Rationale**: Conservative position sizing. Better to underestimate wins than overestimate them. In real trading, slippage and market impact make hitting far targets less likely if price initially moved against you.
+
+**Example**:
+```
+Entry: 100 (LONG)
+Stop: 95
+Target: 115
+Candle: low=90, high=120  (both hit)
+Result: Exit at STOP (95) with -1R
+```
+
 ### Initial Target
 
 Minimum target is **3R** (3x risk).
@@ -439,36 +471,50 @@ Parameters:
 ### Trade Management Pseudocode
 
 ```python
-def manage_trade_plan(plan, current_price, is_long):
-    """Update stop and check for exit"""
-    entry = plan.entry_price
-    stop = plan.stop_loss
-    target = plan.take_profit
+def check_intrabar_exit(plan, candle, is_long):
+    """Check if stop or target hit on this candle"""
+    if is_long:
+        stop_hit = candle['low'] <= plan.stop_loss
+        target_hit = candle['high'] >= plan.take_profit
+    else:
+        stop_hit = candle['high'] >= plan.stop_loss
+        target_hit = candle['low'] <= plan.take_profit
     
+    # Both hit on same bar: stop wins (conservative)
+    if stop_hit and target_hit:
+        return 'STOP'
+    
+    if stop_hit:
+        return 'STOP'
+    if target_hit:
+        return 'TARGET'
+    
+    return None  # No exit, position stays open
+
+def manage_trade_plan(plan, current_price, is_long):
+    """Update stop based on profit level (called every bar)"""
+    entry = plan.actual_entry_price or plan.entry_price
+    stop = plan.stop_loss
     risk = abs(entry - stop)
     
     if is_long:
         current_r = (current_price - entry) / risk
-        
-        # Check for take profit
-        if current_r >= take_profit_at_r:
-            return EXIT_POSITION
-        
-        # Check for breakeven move
-        if current_r >= breakeven_at_r and stop < entry:
-            plan.stop_loss = entry  # Move to breakeven
-            
-    else:  # SHORT
+    else:
         current_r = (entry - current_price) / risk
-        
-        if current_r >= take_profit_at_r:
-            return EXIT_POSITION
-        
-        if current_r >= breakeven_at_r and stop > entry:
-            plan.stop_loss = entry
     
-    return HOLD_POSITION
+    # Check for breakeven move at 2R
+    if current_r >= breakeven_at_r:
+        if (is_long and stop < entry) or (not is_long and stop > entry):
+            plan.stop_loss = entry  # Move to breakeven
+    
+    return {'update_stop': plan.stop_loss, 'current_r': current_r}
 ```
+
+**Key Points**:
+- Exit detection (`check_intrabar_exit`) is separate from stop management (`manage_trade_plan`)
+- Exits are checked using intrabar high/low, not just close price
+- Stop management can move stop to breakeven at 2R profit
+- Position stays open until stop, target, or end of data
 
 ## Position Sizing (2% Rule)
 
@@ -806,7 +852,7 @@ Each run creates a timestamped folder in `./artifacts/sd_v1/<timestamp>_<short_h
 | File | Description |
 |------|-------------|
 | **summary.json** | Aggregate metrics + per-symbol breakdown |
-| **trades.csv** | All trades with: symbol, side, entry, stop, target, planned_R, realized_R, entry_time, exit_time, exit_reason, score, curve_state, trend_state |
+| **trades.csv** | All trades with: symbol, side, entry, stop, target, planned_R, realized_R, entry_idx, exit_idx, entry_time, exit_time, exit_reason (STOP/TARGET/EOD_CLOSE), score, curve_state, trend_state, pnl, position_size |
 | **zones.csv** | All detected zones with: zone_type, proximal, distal, created_at, touches, score inputs |
 | **run_manifest.json** | Git commit hash, config used, Python version, timestamp |
 | **violations.json** | Integrity check results: planned_R violations, entry timing issues, look-ahead flags |
