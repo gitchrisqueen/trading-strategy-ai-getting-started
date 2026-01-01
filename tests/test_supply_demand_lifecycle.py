@@ -332,7 +332,7 @@ class TestLifecycleSimulation:
         # Entry ~101, Stop ~99, Risk ~2, Target ~107 (2R minimum)
         candles.append({'open': 103, 'high': 110, 'low': 103, 'close': 108, 'volume': 1000, 'timestamp': None, 'symbol': 'TEST/USDT'})  # Target hit
         
-        trades, zones, final_capital = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
             'TEST/USDT',
             candles,
             params,
@@ -391,7 +391,7 @@ class TestLifecycleSimulation:
         # Hit stop (should be around 99 with buffer)
         candles.append({'open': 100, 'high': 100, 'low': 95, 'close': 96, 'volume': 1000, 'timestamp': None, 'symbol': 'TEST/USDT'})
         
-        trades, zones, final_capital = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
             'TEST/USDT',
             candles,
             params,
@@ -442,7 +442,7 @@ class TestLifecycleSimulation:
         for i in range(10):
             candles.append({'open': 101, 'high': 104, 'low': 100, 'close': 102, 'volume': 1000, 'timestamp': None, 'symbol': 'TEST/USDT'})
         
-        trades, zones, final_capital = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
             'TEST/USDT',
             candles,
             params,
