@@ -1,0 +1,103 @@
+# ============================================================
+# Supply & Demand V1 - FUTURES Core Configuration
+# ============================================================
+# Description: Core futures/perpetual contracts for validation
+# Market: FUTURES (Binance/Bybit perpetual contracts)
+# Symbols: 5 major liquid futures pairs
+# Duration: 3 months
+# Expected runtime: 1-2 minutes
+# ============================================================
+
+# Experiment metadata
+name: "sd_v1_futures_core"
+description: "S&D V1 backtest on core futures/perpetual contracts"
+
+# Data source: "synthetic" or "historical"
+data_source: "historical"
+
+# Historical data configuration (used when data_source: "historical")
+historical_data:
+  exchange: "binance"
+  market_type: "futures"
+  data_dir: "./data"
+
+# FUTURES symbols (perpetual contracts)
+# These are formatted for Binance/Bybit futures notation
+symbols:
+  - "BTCUSDT"    # Bitcoin perpetual
+  - "SOLUSDT"    # Solana perpetual
+ 
+# Time range for backtest
+# Option 1: Use explicit dates
+ start_date: "2024-01-01"
+ end_date: "2024-12-31"
+
+# Option 2: Use full available history
+#use_full_history: true
+
+# Multi-timeframe configuration
+timeframes:
+  htf: "4h"   # Higher timeframe for curve analysis
+  itf: "1h"   # Intermediate timeframe for trend
+  ltf: "15m"  # Lower timeframe for zone detection and entry
+  rtf: null   # Refining timeframe (optional)
+
+# Candle classification
+candle_classification:
+  boring_body_ratio: 0.50
+  exciting_body_ratio: 0.50
+
+# Zone detection parameters
+zone_detection:
+  min_base_candles: 1
+  max_base_candles: 6
+  min_legout_candles: 1
+  proximal_mode: "body"  # "body" or "wick"
+
+# Scoring thresholds (odds enhancers)
+scoring:
+  min_setup_score: 6.0
+  freshness_touches_best: 0
+  freshness_touches_good: 1
+  base_time_best: 3
+  base_time_good: 6
+  legout_strength_high_threshold: 0.10  # 10%
+  legout_strength_mid_threshold: 0.05   # 5%
+
+# Trade management
+trade_management:
+  risk_pct: 0.02              # 2% risk per trade
+  breakeven_at_r: 2.0         # Move stop to breakeven at 2R
+  take_profit_at_r: 3.0       # Take profit at 3R
+  min_reward_risk: 3.0        # Minimum R:R to consider trade
+  stop_buffer_pct: 0.001      # 0.1% buffer beyond distal
+
+# Trend detection
+trend_detection:
+  pivot_len: 5
+  pivots_to_consider: 4
+
+# Multi-timeframe gating
+mtf_gating:
+  allow_eq_trades: true
+  eq_requires_trend_alignment: true
+  eq_min_setup_score_bonus: 1.0
+
+# Entry configuration
+entry:
+  entry_mode: "limit"  # "limit" or "confirmation"
+  ttl_bars: 10         # Time-to-live for limit orders
+
+# Trading costs
+costs:
+  fees_bps: 10.0      # 0.1% trading fees
+  slippage_bps: 5.0   # 0.05% slippage
+
+# Initial capital
+initial_capital: 10000.0
+
+# Data generation (for synthetic backtests)
+data_generation:
+  num_candles: 1000    # Number of candles per symbol
+  volatility: 0.02     # Price volatility for synthetic data
+  seed: 42             # Random seed for reproducibility
