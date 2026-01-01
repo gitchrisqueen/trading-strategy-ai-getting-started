@@ -4,8 +4,14 @@ This module provides functionality to load real historical candle data
 for USDT-margined perpetual futures contracts. It supports loading from
 CSV files in standard OHLCV format.
 
-CSV Format Expected:
+CSV Format Expected (accepts either 'timestamp' or 'datetime' column):
     timestamp,open,high,low,close,volume
+    2024-01-01 00:00:00,42000.0,42500.0,41800.0,42300.0,1234.56
+    ...
+    
+    OR
+    
+    datetime,open,high,low,close,volume
     2024-01-01 00:00:00,42000.0,42500.0,41800.0,42300.0,1234.56
     ...
 
@@ -156,8 +162,13 @@ def load_historical_candles(
     Example:
         ./data/binance_futures/BTCUSDT_15m.csv
     
-    CSV format (with header):
+    CSV format (with header, accepts 'timestamp' or 'datetime'):
         timestamp,open,high,low,close,volume
+        2024-01-01 00:00:00,42000.0,42500.0,41800.0,42300.0,1234.56
+        
+        OR
+        
+        datetime,open,high,low,close,volume
         2024-01-01 00:00:00,42000.0,42500.0,41800.0,42300.0,1234.56
     
     Args:
@@ -209,19 +220,32 @@ def load_historical_candles(
                     f"CSV file has no header: {file_path}"
                 )
             
-            required_cols = {'timestamp', 'open', 'high', 'low', 'close', 'volume'}
+            # Accept either 'timestamp' or 'datetime' for the date column
+            date_col = None
+            if 'timestamp' in reader.fieldnames:
+                date_col = 'timestamp'
+            elif 'datetime' in reader.fieldnames:
+                date_col = 'datetime'
+            else:
+                raise HistoricalDataError(
+                    f"CSV file missing date column (need 'timestamp' or 'datetime')\n"
+                    f"Found columns: {reader.fieldnames}\n"
+                    f"Expected one of: timestamp, datetime"
+                )
+            
+            required_cols = {'open', 'high', 'low', 'close', 'volume'}
             missing_cols = required_cols - set(reader.fieldnames)
             if missing_cols:
                 raise HistoricalDataError(
                     f"CSV file missing required columns: {missing_cols}\n"
                     f"Found columns: {reader.fieldnames}\n"
-                    f"Expected columns: {required_cols}"
+                    f"Expected columns: {required_cols} + (timestamp or datetime)"
                 )
             
             for row in reader:
                 try:
-                    # Parse timestamp
-                    ts = parse_timestamp(row['timestamp'])
+                    # Parse timestamp (use whichever column is present)
+                    ts = parse_timestamp(row[date_col])
                     
                     # Filter by date range
                     if ts < start_dt or ts > end_dt:
