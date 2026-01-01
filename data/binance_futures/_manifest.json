@@ -1,37 +1,107 @@
 {
   "XRPUSDT_15m": {
-    "last_updated": "2026-01-01T14:06:04.992591+00:00",
-    "first_ts": "2024-01-01 00:00:00",
-    "last_ts": "2024-01-11 09:45:00",
-    "candle_count": 1000,
-    "checksum": "d2d60709989f9235940e70648c291274"
+    "last_updated": "2026-01-01T16:10:48.817135+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:45:00",
+    "candle_count": 70176,
+    "checksum": "24539e7e648ab531cb4d3fe8e3a4415a"
   },
   "SOLUSDT_15m": {
-    "last_updated": "2026-01-01T14:06:04.996100+00:00",
-    "first_ts": "2024-01-01 00:00:00",
-    "last_ts": "2024-01-11 09:45:00",
-    "candle_count": 1000,
-    "checksum": "aedb33533b427c857b817a66878e7782"
+    "last_updated": "2026-01-01T15:55:10.954499+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:45:00",
+    "candle_count": 70176,
+    "checksum": "e23b92ae692282753f7216c139addf41"
   },
   "BNBUSDT_15m": {
-    "last_updated": "2026-01-01T14:06:04.999336+00:00",
-    "first_ts": "2024-01-01 00:00:00",
-    "last_ts": "2024-01-11 09:45:00",
-    "candle_count": 1000,
-    "checksum": "569cf742bc40dcbd20e003f41c74a3be"
+    "last_updated": "2026-01-01T15:38:32.744306+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:45:00",
+    "candle_count": 70176,
+    "checksum": "ea89f579f963b6c7c39c664d848274e1"
   },
   "ETHUSDT_15m": {
-    "last_updated": "2026-01-01T14:06:05.002571+00:00",
-    "first_ts": "2024-01-01 00:00:00",
-    "last_ts": "2024-01-11 09:45:00",
-    "candle_count": 1000,
-    "checksum": "9e35be26095f4739e72bb7e2a33856c3"
+    "last_updated": "2026-01-01T15:21:57.974269+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:45:00",
+    "candle_count": 70176,
+    "checksum": "a1a3c80d97a90a0d9235ffea890fc23a"
   },
   "BTCUSDT_15m": {
-    "last_updated": "2026-01-01T14:06:05.005830+00:00",
-    "first_ts": "2024-01-01 00:00:00",
-    "last_ts": "2024-01-11 09:45:00",
-    "candle_count": 1000,
-    "checksum": "9538dbde5c1dd14641432ea0be6f19a5"
+    "last_updated": "2026-01-01T15:05:28.720284+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:45:00",
+    "candle_count": 70176,
+    "checksum": "2d7bf6d4c3bdc0c1048da45440cf7402"
+  },
+  "BTCUSDT_1h": {
+    "last_updated": "2026-01-01T15:11:03.594708+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:00:00",
+    "candle_count": 17544,
+    "checksum": "ba857752a9e16a9563bc8dd7c1adc27b"
+  },
+  "BTCUSDT_4h": {
+    "last_updated": "2026-01-01T15:16:34.618227+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 20:00:00",
+    "candle_count": 4386,
+    "checksum": "6c92c8938d1bdf9a5395033a34636c1c"
+  },
+  "ETHUSDT_1h": {
+    "last_updated": "2026-01-01T15:27:25.173724+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:00:00",
+    "candle_count": 17544,
+    "checksum": "2e8a5adc37d3ff615758b78a1db8c547"
+  },
+  "ETHUSDT_4h": {
+    "last_updated": "2026-01-01T15:32:56.834561+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 20:00:00",
+    "candle_count": 4386,
+    "checksum": "9f3792421b285dbde277226cceee2ba0"
+  },
+  "BNBUSDT_1h": {
+    "last_updated": "2026-01-01T15:44:05.815405+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:00:00",
+    "candle_count": 17544,
+    "checksum": "a775b26fd037cfb89f66312cb7840fcc"
+  },
+  "BNBUSDT_4h": {
+    "last_updated": "2026-01-01T15:49:45.337199+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 20:00:00",
+    "candle_count": 4386,
+    "checksum": "99fa7c87e1242475f3f8bc094b1ba0c3"
+  },
+  "SOLUSDT_1h": {
+    "last_updated": "2026-01-01T16:00:39.072771+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:00:00",
+    "candle_count": 17544,
+    "checksum": "4860dc1dce0c59f2215aeb51d710ed02"
+  },
+  "SOLUSDT_4h": {
+    "last_updated": "2026-01-01T16:05:43.594425+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 20:00:00",
+    "candle_count": 4386,
+    "checksum": "dbe6c076431fadb0d5ef8f43d9df08b4"
+  },
+  "XRPUSDT_1h": {
+    "last_updated": "2026-01-01T16:15:48.450812+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 23:00:00",
+    "candle_count": 17544,
+    "checksum": "5fb465adf69f76caf80679af59d52062"
+  },
+  "XRPUSDT_4h": {
+    "last_updated": "2026-01-01T16:21:02.164818+00:00",
+    "first_ts": "2023-01-01 00:00:00",
+    "last_ts": "2024-12-31 20:00:00",
+    "candle_count": 4386,
+    "checksum": "2f0a700fd97f28d8004710818564c90f"
   }
 }
