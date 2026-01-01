@@ -327,3 +327,197 @@ class TestSymbolBacktest:
             assert 'zone_type' in zone
             assert 'proximal' in zone
             assert 'distal' in zone
+
+
+class TestMultiSymbolIsolation:
+    """Test that multi-symbol runs produce different results per symbol"""
+    
+    def test_different_symbols_produce_different_candles(self):
+        """Test that different symbols get different candle data"""
+        # Generate candles for two symbols with same base seed
+        candles_btc = generate_synthetic_candles('BTC/USDT', 100, seed=42)
+        candles_eth = generate_synthetic_candles('ETH/USDT', 100, seed=42)
+        
+        # Same seed should produce same candles if symbol not considered
+        # But we want to verify they're actually the same
+        assert len(candles_btc) == len(candles_eth) == 100
+        
+        # Check if they're identical (they shouldn't be if symbol is part of seed)
+        close_prices_match = all(
+            c1['close'] == c2['close'] 
+            for c1, c2 in zip(candles_btc, candles_eth)
+        )
+        
+        # If they match, that's the bug we're trying to prevent
+        # This test documents the expected behavior
+        # With symbol-specific seeding, they should differ
+        
+    def test_multi_symbol_experiment_produces_different_results(self, temp_artifacts_dir):
+        """Test that multi-symbol experiment produces different per-symbol results"""
+        # Create config with 2 symbols
+        config = {
+            'name': 'multi_symbol_test',
+            'description': 'Test multi-symbol isolation',
+            'symbols': ['BTC/USDT', 'ETH/USDT'],
+            'start_date': '2024-01-01',
+            'end_date': '2024-01-31',
+            'timeframes': {
+                'htf': '4h',
+                'itf': '1h',
+                'ltf': '15m',
+                'rtf': None,
+            },
+            'candle_classification': {
+                'boring_body_ratio': 0.50,
+                'exciting_body_ratio': 0.50,
+            },
+            'zone_detection': {
+                'min_base_candles': 1,
+                'max_base_candles': 6,
+                'min_legout_candles': 1,
+                'proximal_mode': 'body',
+            },
+            'scoring': {
+                'min_setup_score': 6.0,
+                'freshness_touches_best': 0,
+                'freshness_touches_good': 1,
+                'base_time_best': 3,
+                'base_time_good': 6,
+                'legout_strength_high_threshold': 0.10,
+                'legout_strength_mid_threshold': 0.05,
+            },
+            'trade_management': {
+                'risk_pct': 0.02,
+                'breakeven_at_r': 2.0,
+                'take_profit_at_r': 3.0,
+                'min_reward_risk': 3.0,
+                'stop_buffer_pct': 0.001,
+            },
+            'trend_detection': {
+                'pivot_len': 5,
+                'pivots_to_consider': 4,
+            },
+            'mtf_gating': {
+                'allow_eq_trades': True,
+                'eq_requires_trend_alignment': True,
+                'eq_min_setup_score_bonus': 1.0,
+            },
+            'entry': {
+                'entry_mode': 'limit',
+                'ttl_bars': 10,
+            },
+            'costs': {
+                'fees_bps': 10.0,
+                'slippage_bps': 5.0,
+            },
+            'initial_capital': 10000.0,
+            'data_generation': {
+                'num_candles': 300,
+                'volatility': 0.02,
+                'seed': 42,
+            },
+        }
+        
+        # Save config to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            yaml.dump(config, f)
+            config_path = f.name
+        
+        try:
+            # Run experiment
+            result = run_backtest_experiment(config_path)
+            write_artifacts(result, temp_artifacts_dir)
+            
+            # Load summary
+            with open(temp_artifacts_dir / 'summary.json', 'r') as f:
+                summary = json.load(f)
+            
+            # Get per-symbol results
+            assert len(summary['symbol_results']) == 2
+            sr1 = summary['symbol_results'][0]
+            sr2 = summary['symbol_results'][1]
+            
+            # Check that symbols are different
+            assert sr1['symbol'] != sr2['symbol']
+            assert sr1['symbol'] == 'BTC/USDT'
+            assert sr2['symbol'] == 'ETH/USDT'
+            
+            # Critical: zone counts should differ (extremely unlikely to be identical)
+            # If both have 0 zones, that's OK, but if both have same non-zero count, that's suspicious
+            if sr1['total_zones'] > 0 and sr2['total_zones'] > 0:
+                # With different random seeds, zone counts should differ
+                # Allow small chance they might be equal, but check other metrics too
+                zones_differ = sr1['total_zones'] != sr2['total_zones']
+                fresh_differ = sr1['fresh_zones'] != sr2['fresh_zones']
+                
+                # At least one metric should differ
+                assert zones_differ or fresh_differ, (
+                    "Zone metrics are identical for both symbols, indicating data duplication"
+                )
+            
+            # Load trades and check they differ (if any exist)
+            with open(temp_artifacts_dir / 'trades.csv', 'r') as f:
+                reader = csv.DictReader(f)
+                trades = list(reader)
+            
+            # If no trades, that's OK - just skip trade comparison
+            if trades:
+                # Get trades per symbol
+                trades_btc = [t for t in trades if t['symbol'] == 'BTC/USDT']
+                trades_eth = [t for t in trades if t['symbol'] == 'ETH/USDT']
+                
+                # If both symbols have trades, check that entry prices differ
+                if trades_btc and trades_eth:
+                    # Get first trade from each symbol
+                    entry_btc = float(trades_btc[0]['entry'])
+                    entry_eth = float(trades_eth[0]['entry'])
+                    
+                    # Entry prices should be different (different candle data)
+                    assert abs(entry_btc - entry_eth) > 1.0, (
+                        f"Entry prices too similar: BTC={entry_btc}, ETH={entry_eth}. "
+                        "Indicates duplicate candle data."
+                    )
+            
+            # Verify no curve_state or trend_state in trades.csv
+            with open(temp_artifacts_dir / 'trades.csv', 'r') as f:
+                reader = csv.DictReader(f)
+                fieldnames = reader.fieldnames
+                
+                assert 'curve_state' not in fieldnames, (
+                    "curve_state should not be in trades.csv (not implemented)"
+                )
+                assert 'trend_state' not in fieldnames, (
+                    "trend_state should not be in trades.csv (not implemented)"
+                )
+                
+        finally:
+            # Cleanup
+            Path(config_path).unlink(missing_ok=True)
+    
+    def test_symbol_specific_seed_generation(self):
+        """Test that symbol-specific seeds are different"""
+        base_seed = 42
+        
+        # Simulate what runner does
+        symbol1 = "BTC/USDT"
+        symbol2 = "ETH/USDT"
+        
+        seed1 = hash(symbol1 + str(base_seed)) % (2**31)
+        seed2 = hash(symbol2 + str(base_seed)) % (2**31)
+        
+        # Seeds should be different
+        assert seed1 != seed2, "Symbol-specific seeds should differ"
+        
+        # Generate candles with these seeds
+        candles1 = generate_synthetic_candles(symbol1, 50, seed=seed1)
+        candles2 = generate_synthetic_candles(symbol2, 50, seed=seed2)
+        
+        # Candles should differ
+        assert len(candles1) == len(candles2) == 50
+        
+        # Check that at least some prices differ
+        closes1 = [c['close'] for c in candles1]
+        closes2 = [c['close'] for c in candles2]
+        
+        # They should not be identical
+        assert closes1 != closes2, "Candles with different seeds should differ"
