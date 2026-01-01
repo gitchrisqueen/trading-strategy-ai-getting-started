@@ -242,8 +242,7 @@ def execute_backtest_for_symbol(
                         'exit_idx': None,
                         'exit_reason': None,
                         'score': plan.score,
-                        'curve_state': None,  # Simplified for now
-                        'trend_state': None,  # Simplified for now
+                        # curve_state and trend_state removed until properly implemented
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
                         'position_size': plan.position_size,
@@ -501,12 +500,19 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     for symbol in config['symbols']:
         print(f"Running backtest for {symbol}...")
         
-        # Generate synthetic candles
+        # Generate synthetic candles with symbol-specific seed
+        # Use hash of symbol + base seed to ensure different data per symbol
+        base_seed = config['data_generation']['seed']
+        if base_seed is not None:
+            symbol_seed = hash(symbol + str(base_seed)) % (2**31)  # Keep seed in valid range
+        else:
+            symbol_seed = None
+        
         candles = generate_synthetic_candles(
             symbol,
             num_candles=config['data_generation']['num_candles'],
             volatility=config['data_generation']['volatility'],
-            seed=config['data_generation']['seed']
+            seed=symbol_seed
         )
         
         # Execute backtest
@@ -540,6 +546,38 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         symbol_results.append(symbol_result)
         all_trades.extend(trades)
         all_zones.extend(zones)
+    
+    # Guard-rail: Validate that multi-symbol runs have different data per symbol
+    if len(config['symbols']) >= 2:
+        # Compare results between first two symbols
+        if len(symbol_results) >= 2:
+            sr1, sr2 = symbol_results[0], symbol_results[1]
+            
+            # Check if zone counts are identical (unlikely if data differs)
+            # Check if trade entry prices are identical (very unlikely if data differs)
+            identical_zones = (sr1.total_zones == sr2.total_zones and 
+                             sr1.fresh_zones == sr2.fresh_zones)
+            
+            # Get trades for first two symbols
+            trades_sym1 = [t for t in all_trades if t['symbol'] == config['symbols'][0]]
+            trades_sym2 = [t for t in all_trades if t['symbol'] == config['symbols'][1]]
+            
+            # Check if entry prices are suspiciously similar
+            if trades_sym1 and trades_sym2 and len(trades_sym1) == len(trades_sym2):
+                entries_match = all(
+                    abs(t1['entry'] - t2['entry']) < 1e-6 
+                    for t1, t2 in zip(trades_sym1, trades_sym2)
+                )
+                if entries_match and identical_zones:
+                    raise ValueError(
+                        f"Multi-symbol data isolation failure detected!\n"
+                        f"Symbols {config['symbols'][0]} and {config['symbols'][1]} have identical results:\n"
+                        f"  - Same zone counts ({sr1.total_zones} zones)\n"
+                        f"  - Same number of trades ({len(trades_sym1)} trades)\n"
+                        f"  - Identical entry prices\n"
+                        f"Likely cause: Same seed or candle data being reused across symbols.\n"
+                        f"Check that generate_synthetic_candles is using symbol-specific seeds."
+                    )
     
     # Calculate aggregate metrics
     all_filled_trades = [t for t in all_trades if t['realized_R'] is not None]
@@ -627,10 +665,10 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     with open(artifacts_dir / 'summary.json', 'w') as f:
         json.dump(summary, f, indent=2)
     
-    # Write trades.csv
-    if result.all_trades:
-        trades_file = artifacts_dir / 'trades.csv'
-        with open(trades_file, 'w', newline='') as f:
+    # Write trades.csv (always create file, even if empty)
+    trades_file = artifacts_dir / 'trades.csv'
+    with open(trades_file, 'w', newline='') as f:
+        if result.all_trades:
             # Get all possible fieldnames
             fieldnames = set()
             for trade in result.all_trades:
@@ -640,6 +678,16 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(result.all_trades)
+        else:
+            # Write header only with expected columns
+            expected_columns = [
+                'symbol', 'side', 'entry', 'stop', 'target',
+                'planned_R', 'planned_r', 'realized_R', 
+                'entry_time', 'entry_idx', 'exit_time', 'exit_idx',
+                'exit_reason', 'score', 'zone_created_at', 'pnl', 'position_size'
+            ]
+            writer = csv.DictWriter(f, fieldnames=expected_columns)
+            writer.writeheader()
     
     # Write zones.csv
     if result.all_zones:
