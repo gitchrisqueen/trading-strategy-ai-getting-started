@@ -30,22 +30,38 @@ python data_tools/binance_usdm_ohlcv.py update \
 
 ### validate_ohlcv.py
 
-Validate OHLCV CSV files for integrity.
+Validate OHLCV CSV files for integrity. **Automatically detects timeframe from filename.**
 
+**Auto-detect timeframes** (recommended):
 ```bash
-python data_tools/validate_ohlcv.py \
-  ./data/binance_futures/*.csv \
-  --timeframe 15m \
-  --verbose
+# Validates all files, inferring timeframe from filename
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv
+```
+
+**Filter by specific timeframe**:
+```bash
+# Only validates 1h files
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --timeframe 1h
+```
+
+**Allow gap tolerance**:
+```bash
+# Allow up to 2 missing intervals
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --max-gap-intervals 2
 ```
 
 **Checks:**
 - Monotonic timestamps (strictly increasing)
 - No duplicates
-- Expected interval spacing
+- Expected interval spacing (per timeframe)
 - Gap detection
 - Valid OHLC relationships
 - Positive prices and volumes
+
+**Timeframe Detection:**
+- Automatically extracts timeframe from filename (e.g., `BTCUSDT_15m.csv` → `15m`)
+- Validates each file with its correct interval (no more false gaps!)
+- Supports: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w
 
 ## Quick Start
 

@@ -61,22 +61,37 @@ python data_tools/binance_usdm_ohlcv.py update \
 
 ### 3. Validate Data Quality
 
-Check for gaps, duplicates, and invalid data:
+Check for gaps, duplicates, and invalid data. **Timeframes are automatically detected from filenames!**
 
 ```bash
-python data_tools/validate_ohlcv.py \
-  ./data/binance_futures/*.csv \
-  --timeframe 15m \
-  --verbose
+# Auto-detect timeframes (recommended)
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --verbose
+```
+
+**Advanced options:**
+```bash
+# Only validate 1h files
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --timeframe 1h
+
+# Allow up to 2 missing intervals (for known exchange downtime)
+python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --max-gap-intervals 2
 ```
 
 **What's checked:**
 - ✓ Monotonic timestamps (strictly increasing)
 - ✓ No duplicate timestamps
-- ✓ Expected interval spacing
+- ✓ Expected interval spacing (15m files use 15m interval, 1h files use 1h interval, etc.)
 - ✓ Gap detection (missing candles)
 - ✓ Valid OHLC relationships (high >= low, etc.)
 - ✓ Positive prices and volumes
+
+**Timeframe Detection:**
+The validator automatically detects the timeframe from the filename pattern:
+- `BTCUSDT_15m.csv` → validates with 15-minute intervals
+- `ETHUSDT_1h.csv` → validates with 1-hour intervals
+- `BNBUSDT_4h.csv` → validates with 4-hour intervals
+
+This eliminates false "gap detected" errors that occurred when all files were validated with a single timeframe.
 
 ### 4. Run Backtest
 

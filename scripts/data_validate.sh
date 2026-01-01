@@ -11,7 +11,6 @@ echo ""
 
 # Configuration
 DATA_DIR="./data/binance_futures"
-TIMEFRAME="15m"
 
 if [ ! -d "$DATA_DIR" ]; then
   echo "Error: Data directory not found: $DATA_DIR"
@@ -29,13 +28,12 @@ if [ "$CSV_COUNT" -eq 0 ]; then
 fi
 
 echo "Validating $CSV_COUNT files in $DATA_DIR"
-echo "Timeframe: $TIMEFRAME"
+echo "Note: Timeframes will be auto-detected from filenames"
 echo ""
 
-# Run validation
+# Run validation (timeframe auto-detected per file)
 python data_tools/validate_ohlcv.py \
   $DATA_DIR/*.csv \
-  --timeframe $TIMEFRAME \
   --verbose
 
 echo ""

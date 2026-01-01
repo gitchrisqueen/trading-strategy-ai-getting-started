@@ -11,14 +11,20 @@ Validates OHLCV CSV files for:
 Returns exit code 0 on success, non-zero on validation failure.
 
 Usage:
-  # Validate single file
-  python data_tools/validate_ohlcv.py ./data/binance_futures/BTCUSDT_15m.csv --timeframe 15m
+  # Validate files with auto-detected timeframes
+  python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv
 
-  # Validate all files in directory
-  python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --timeframe 15m
+  # Validate single file (timeframe inferred from filename)
+  python data_tools/validate_ohlcv.py ./data/binance_futures/BTCUSDT_15m.csv
 
-  # Validate with custom gap tolerance
-  python data_tools/validate_ohlcv.py ./data/binance_futures/BTCUSDT_15m.csv --timeframe 15m --max-gaps 5
+  # Validate only 1h files explicitly
+  python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --timeframe 1h
+
+  # Allow small gaps (up to 2 missing intervals)
+  python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --max-gap-intervals 2
+
+  # Verbose output with all errors
+  python data_tools/validate_ohlcv.py ./data/binance_futures/*.csv --verbose
 """
 
 import argparse
@@ -63,8 +69,9 @@ class ValidationError:
 
 class ValidationResult:
     """Aggregated validation results"""
-    def __init__(self, file_path: Path):
+    def __init__(self, file_path: Path, timeframe: Optional[str] = None):
         self.file_path = file_path
+        self.timeframe = timeframe
         self.errors: List[ValidationError] = []
         self.warnings: List[str] = []
         self.total_rows = 0
@@ -81,10 +88,11 @@ class ValidationResult:
         return len(self.errors) == 0
     
     def summary(self) -> str:
+        timeframe_str = f" [{self.timeframe}]" if self.timeframe else ""
         if self.is_valid():
-            return f"✓ {self.file_path.name}: PASS ({self.total_rows} rows)"
+            return f"✓ {self.file_path.name}{timeframe_str}: PASS ({self.total_rows} rows)"
         else:
-            return f"✗ {self.file_path.name}: FAIL ({len(self.errors)} errors)"
+            return f"✗ {self.file_path.name}{timeframe_str}: FAIL ({len(self.errors)} errors)"
 
 
 def parse_timestamp(ts_str: str) -> datetime:
@@ -110,6 +118,35 @@ def parse_timestamp(ts_str: str) -> datetime:
         pass
     
     raise ValueError(f"Cannot parse timestamp: {ts_str}")
+
+
+def extract_timeframe_from_filename(file_path: Path) -> Optional[str]:
+    """Extract timeframe from filename pattern {SYMBOL}_{TIMEFRAME}.csv
+    
+    Args:
+        file_path: Path to CSV file
+    
+    Returns:
+        Timeframe string (e.g., '15m', '1h', '4h') or None if not found
+    
+    Examples:
+        BTCUSDT_15m.csv -> 15m
+        ETHUSDT_1h.csv -> 1h
+        BNBUSDT_4h.csv -> 4h
+    """
+    # Get filename without extension
+    filename = file_path.stem
+    
+    # Try to extract timeframe after last underscore
+    parts = filename.split('_')
+    if len(parts) >= 2:
+        potential_tf = parts[-1].lower()
+        
+        # Check if it matches a known timeframe
+        if potential_tf in TIMEFRAME_INTERVALS:
+            return potential_tf
+    
+    return None
 
 
 def validate_ohlc_relationships(row: Dict[str, Any], row_num: int) -> List[ValidationError]:
@@ -182,19 +219,25 @@ def validate_ohlc_relationships(row: Dict[str, Any], row_num: int) -> List[Valid
 def validate_csv_file(
     file_path: Path,
     timeframe: Optional[str] = None,
-    max_gap_multiplier: int = 1
+    max_gap_intervals: int = 0
 ) -> ValidationResult:
     """Validate a single OHLCV CSV file
     
     Args:
         file_path: Path to CSV file
-        timeframe: Expected timeframe (e.g., '15m', '1h')
-        max_gap_multiplier: Allow gaps up to this many intervals
+        timeframe: Expected timeframe (e.g., '15m', '1h'). If None, will try to infer from filename.
+        max_gap_intervals: Allow gaps up to this many intervals (default: 0 = no tolerance)
     
     Returns:
         ValidationResult with errors and warnings
     """
-    result = ValidationResult(file_path)
+    # Try to infer timeframe from filename if not provided
+    inferred_timeframe = None
+    if timeframe is None:
+        inferred_timeframe = extract_timeframe_from_filename(file_path)
+        timeframe = inferred_timeframe
+    
+    result = ValidationResult(file_path, timeframe=timeframe)
     
     # Check file exists
     if not file_path.exists():
@@ -305,12 +348,15 @@ def validate_csv_file(
                 prev_ts = ts
                 prev_row = row
             
-            # Check interval spacing and gaps (if timeframe provided)
+            # Check interval spacing and gaps (if timeframe provided or inferred)
             if timeframe:
                 expected_interval = TIMEFRAME_INTERVALS.get(timeframe)
                 if not expected_interval:
                     result.add_warning(f"Unknown timeframe: {timeframe}. Skipping gap detection.")
                 else:
+                    if inferred_timeframe:
+                        result.add_warning(f"Inferred timeframe: {inferred_timeframe}")
+                    
                     # Check gaps
                     prev_row_num, prev_ts, _ = rows[0]
                     for row_num, ts, _ in rows[1:]:
@@ -321,7 +367,7 @@ def validate_csv_file(
                             # Calculate how many intervals are missing
                             missing_intervals = int(actual_interval / expected_interval) - 1
                             
-                            if missing_intervals > max_gap_multiplier:
+                            if missing_intervals > max_gap_intervals:
                                 result.add_error(ValidationError(
                                     'GAP_DETECTED',
                                     row_num,
@@ -338,6 +384,8 @@ def validate_csv_file(
                         
                         prev_row_num = row_num
                         prev_ts = ts
+            else:
+                result.add_warning("No timeframe provided or inferred. Skipping gap detection.")
     
     except Exception as e:
         result.add_error(ValidationError(
@@ -359,17 +407,19 @@ def main():
     parser.add_argument(
         'files',
         nargs='+',
-        help='CSV files to validate'
+        help='CSV files to validate (supports wildcards)'
     )
     parser.add_argument(
         '--timeframe',
-        help='Expected timeframe for gap detection (e.g., 15m, 1h, 4h)'
+        help='Expected timeframe for gap detection (e.g., 15m, 1h, 4h). '
+             'If not provided, will attempt to infer from filename. '
+             'If provided, only validates files matching this timeframe.'
     )
     parser.add_argument(
-        '--max-gap-multiplier',
+        '--max-gap-intervals',
         type=int,
-        default=1,
-        help='Allow gaps up to this many intervals (default: 1)'
+        default=0,
+        help='Allow gaps up to this many intervals (default: 0 = strict, no tolerance)'
     )
     parser.add_argument(
         '--verbose',
@@ -389,10 +439,17 @@ def main():
             file_paths = [Path(file_pattern)]
         
         for file_path in file_paths:
+            # If user specified a timeframe, check if file matches
+            if args.timeframe:
+                file_tf = extract_timeframe_from_filename(file_path)
+                if file_tf and file_tf != args.timeframe:
+                    # Skip files that don't match the requested timeframe
+                    continue
+            
             result = validate_csv_file(
                 file_path,
                 timeframe=args.timeframe,
-                max_gap_multiplier=args.max_gap_multiplier
+                max_gap_intervals=args.max_gap_intervals
             )
             results.append(result)
     
