@@ -61,7 +61,7 @@ All deliverables from the problem statement have been successfully implemented a
 - [x] All tests pass (115/115) ✓
 - [x] Notebook runs end-to-end (code validated with integration tests) ✓
 - [x] No unrelated refactors ✓
-- [x] Assumptions documented in MTF_GATING_GUIDE.md ✓
+- [x] Assumptions documented in strategies/supply_demand_v1/MTF_GATING_GUIDE.md ✓
 
 ## Files Changed Summary
 
@@ -70,7 +70,7 @@ All deliverables from the problem statement have been successfully implemented a
 | `strategy.py` | Modified | +~300 | Core gating implementation |
 | `test_supply_demand_mtf_gating.py` | New | +548 | Comprehensive test suite |
 | `supply_demand_v1_backtest.ipynb` | Modified | +124, -47 | Demo with stats |
-| `MTF_GATING_GUIDE.md` | New | +183 | Technical documentation |
+| `strategies/supply_demand_v1/MTF_GATING_GUIDE.md` | New | +183 | Technical documentation |
 | `MTF_IMPLEMENTATION_SUMMARY.md` | New | +241 | Implementation summary |
 | **TOTAL** | - | **+1396, -47** | **Net: +1349 lines** |
 
@@ -152,7 +152,7 @@ Result:
 
 Three comprehensive documentation files created:
 
-1. **`MTF_GATING_GUIDE.md`** (183 lines)
+1. **`strategies/supply_demand_v1/MTF_GATING_GUIDE.md`** (183 lines)
    - Architecture overview
    - Function documentation
    - Usage examples
