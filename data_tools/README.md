@@ -18,6 +18,8 @@ python data_tools/binance_usdm_ohlcv.py bootstrap \
   --out ./data/binance_futures
 ```
 
+**Note**: The tool automatically handles Binance Vision CSV files with or without header rows.
+
 **Update** - Fetch latest candles via CCXT:
 ```bash
 python data_tools/binance_usdm_ohlcv.py update \

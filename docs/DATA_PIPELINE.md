@@ -28,6 +28,7 @@ python data_tools/binance_usdm_ohlcv.py bootstrap \
 
 **What happens:**
 - Downloads daily zip files from https://data.binance.vision/
+- Automatically handles CSV files with or without header rows
 - Extracts and consolidates candles
 - Removes duplicates and sorts by timestamp
 - Writes CSV files: `./data/binance_futures/{SYMBOL}_{TIMEFRAME}.csv`

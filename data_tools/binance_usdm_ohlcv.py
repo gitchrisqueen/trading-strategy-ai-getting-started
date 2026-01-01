@@ -227,8 +227,11 @@ def download_binance_vision_zip(
 def parse_binance_vision_csv(zip_path: Path) -> List[Dict[str, Any]]:
     """Parse Binance Vision CSV from zip file
     
-    Binance CSV format (no header):
+    Binance CSV format (may have header):
     timestamp,open,high,low,close,volume,close_time,quote_volume,trades,taker_buy_vol,taker_buy_quote_vol,ignore
+    
+    Or with header:
+    open_time,open,high,low,close,volume,close_time,quote_volume,trades,taker_buy_vol,taker_buy_quote_vol,ignore
     """
     with zipfile.ZipFile(zip_path, 'r') as zf:
         # Should contain one CSV file
@@ -241,7 +244,9 @@ def parse_binance_vision_csv(zip_path: Path) -> List[Dict[str, Any]]:
             content = f.read().decode('utf-8')
             
             candles = []
-            for line in content.strip().split('\n'):
+            lines = content.strip().split('\n')
+            
+            for i, line in enumerate(lines):
                 if not line:
                     continue
                 
@@ -249,8 +254,18 @@ def parse_binance_vision_csv(zip_path: Path) -> List[Dict[str, Any]]:
                 if len(parts) < 11:
                     continue
                 
-                # Parse timestamp (milliseconds)
-                ts_ms = int(parts[0])
+                # Skip header row if present (check if first column is numeric)
+                try:
+                    ts_ms = int(parts[0])
+                except ValueError:
+                    # First column is not numeric, likely a header row
+                    if i == 0 and ('time' in parts[0].lower() or 'open' in parts[0].lower()):
+                        continue  # Skip header
+                    else:
+                        # Unknown format, skip this line
+                        print(f"Warning: Skipping line {i+1} in {csv_name}: cannot parse timestamp")
+                        continue
+                
                 dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                 
                 candle = {
