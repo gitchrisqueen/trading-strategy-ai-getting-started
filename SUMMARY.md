@@ -162,7 +162,7 @@ python -m pytest tests/test_supply_demand_zones.py -v
 
 **Files Added:**
 
-1. **`IMPLEMENTATION.md`** - Complete implementation documentation
+1. **`strategies/supply_demand_v1/IMPLEMENTATION.md`** - Complete implementation documentation
    - Feature descriptions
    - Usage examples
    - Implementation details

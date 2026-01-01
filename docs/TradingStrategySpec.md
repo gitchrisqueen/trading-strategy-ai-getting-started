@@ -354,8 +354,8 @@ In code, this strategy naturally maps to:
 
 ## Source
 
-This file is derived from the original documents:
-- `trading-app_wiki_TradingStrategyDoc.md at master · gitchrisqueen_trading-app.pdf`
-- `TradingStrategyDoc.md`
+This file is derived from the original external documents (no longer in this repository):
+- trading-app_wiki_TradingStrategyDoc.md at master · gitchrisqueen_trading-app.pdf
+- TradingStrategyDoc.md
 
 Images and diagrams were replaced with explicit written definitions and implementable rules.

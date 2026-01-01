@@ -127,7 +127,7 @@ If you notice a bug (e.g., incorrect calculation), fix it. But don't change thre
 - Keep parameter tables accurate (defaults, ranges, meanings)
 - Add entries to "How to Run Experiments" if new configs or commands are added
 
-### `TradingStrategySpec.md`
+### `strategies/supply_demand_v1/TradingStrategySpec.md`
 
 **Original spec document** - historical reference.
 

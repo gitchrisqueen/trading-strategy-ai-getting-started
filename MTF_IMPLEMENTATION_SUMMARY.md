@@ -2,7 +2,7 @@
 
 ## Changes Overview
 
-This PR implements multi-timeframe (MTF) analysis with HTF curve and ITF trend gating for the Supply & Demand V1 strategy, as specified in `TradingStrategySpec.md`.
+This PR implements multi-timeframe (MTF) analysis with HTF curve and ITF trend gating for the Supply & Demand V1 strategy, as specified in `strategies/supply_demand_v1/TradingStrategySpec.md`.
 
 ## Files Changed
 

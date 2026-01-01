@@ -249,7 +249,7 @@ The Docker image is built for Intel. Local Poetry installation is faster on Appl
 ## Next Steps
 
 1. **Explore other examples**: Check `notebooks/single-backtest/` for more strategies
-2. **Read strategy docs**: See `docs/STRATEGY_SUPPLY_DEMAND_V1.md` for complete strategy spec
+2. **Read strategy docs**: See `strategies/supply_demand_v1/README.md` for complete strategy spec
 3. **Review repository map**: See `docs/REPO_MAP.md` for file structure
 4. **Learn workflow**: See `docs/COPILOT_WORKFLOW.md` for development guidelines
 5. **Run tests**: Verify your environment with `poetry run pytest`
