@@ -24,7 +24,7 @@ Functions:
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import hashlib
 
 
