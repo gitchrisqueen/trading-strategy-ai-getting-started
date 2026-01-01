@@ -31,8 +31,12 @@ symbols:
   - "XRPUSDT"    # Ripple perpetual
 
 # Time range for backtest
-start_date: "2024-01-01"
-end_date: "2024-03-31"
+# Option 1: Use explicit dates
+# start_date: "2024-01-01"
+# end_date: "2024-03-31"
+
+# Option 2: Use full available history
+use_full_history: true
 
 # Multi-timeframe configuration
 timeframes:
