@@ -1,0 +1,93 @@
+# ============================================================
+# Supply & Demand V1 - Full History Test Configuration
+# ============================================================
+# Description: Test configuration using use_full_history=true
+# Purpose: Validate full history window detection and usage
+# ============================================================
+
+# Experiment metadata
+name: "sd_v1_full_history_test"
+description: "Test full history window usage"
+
+# Data source: "historical"
+data_source: "historical"
+
+# Use full available history
+use_full_history: true
+
+# Historical data configuration
+historical_data:
+  exchange: "binance"
+  market_type: "futures"
+  data_dir: "./data"
+
+# FUTURES symbols (small set for testing)
+symbols:
+  - "BTCUSDT"
+
+# Multi-timeframe configuration
+timeframes:
+  htf: "4h"   # Higher timeframe for curve analysis
+  itf: "1h"   # Intermediate timeframe for trend
+  ltf: "15m"  # Lower timeframe for zone detection and entry
+  rtf: null   # Refining timeframe (optional)
+
+# Candle classification
+candle_classification:
+  boring_body_ratio: 0.50
+  exciting_body_ratio: 0.50
+
+# Zone detection parameters
+zone_detection:
+  min_base_candles: 1
+  max_base_candles: 6
+  min_legout_candles: 1
+  proximal_mode: "body"
+
+# Scoring thresholds (odds enhancers)
+scoring:
+  min_setup_score: 6.0
+  freshness_touches_best: 0
+  freshness_touches_good: 1
+  base_time_best: 3
+  base_time_good: 6
+  legout_strength_high_threshold: 0.10  # 10%
+  legout_strength_mid_threshold: 0.05   # 5%
+
+# Trade management
+trade_management:
+  risk_pct: 0.02
+  breakeven_at_r: 2.0
+  take_profit_at_r: 3.0
+  min_reward_risk: 3.0
+  stop_buffer_pct: 0.001
+
+# Trend detection
+trend_detection:
+  pivot_len: 5
+  pivots_to_consider: 4
+
+# Multi-timeframe gating
+mtf_gating:
+  allow_eq_trades: true
+  eq_requires_trend_alignment: true
+  eq_min_setup_score_bonus: 1.0
+
+# Entry configuration
+entry:
+  entry_mode: "limit"
+  ttl_bars: 10
+
+# Trading costs
+costs:
+  fees_bps: 10.0
+  slippage_bps: 5.0
+
+# Initial capital
+initial_capital: 10000.0
+
+# Data generation (not used with historical data)
+data_generation:
+  num_candles: 1000
+  volatility: 0.02
+  seed: 42

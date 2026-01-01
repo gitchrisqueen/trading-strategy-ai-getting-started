@@ -70,6 +70,7 @@ from strategies.supply_demand_v1.integrity import (
 
 from strategies.supply_demand_v1.data_loader import (
     load_historical_candles,
+    find_common_window,
     HistoricalDataError,
 )
 
@@ -167,6 +168,22 @@ def check_metrics_consistency(
 
 
 @dataclass
+class DecisionFunnel:
+    """Decision funnel metrics for tracking why trades were/weren't taken"""
+    symbol: str
+    zones_detected: int = 0
+    zones_fresh: int = 0
+    candidates_evaluated: int = 0
+    rejected_curve: int = 0
+    rejected_trend: int = 0
+    rejected_min_score: int = 0
+    rejected_min_rr: int = 0
+    orders_placed: int = 0
+    orders_filled: int = 0
+    orders_expired_ttl: int = 0
+
+
+@dataclass
 class SymbolResult:
     """Results for a single symbol backtest"""
     symbol: str
@@ -184,6 +201,8 @@ class SymbolResult:
     equity_curve: List[float]  # Track full equity curve
     # Data provenance
     data_provenance: Dict[str, Any]  # first/last timestamp, close prices, checksum, etc.
+    # Decision funnel
+    decision_funnel: Optional['DecisionFunnel'] = None
 
 
 @dataclass
@@ -197,6 +216,7 @@ class ExperimentResult:
     integrity_report: IntegrityReport
     run_manifest: Dict[str, Any]
     metrics_warnings: List[Dict[str, Any]]  # Consistency warnings
+    decision_funnels: List[DecisionFunnel]  # Per-symbol decision funnels
 
 
 def generate_synthetic_candles(
@@ -269,16 +289,19 @@ def generate_synthetic_candles(
 
 def load_candles_from_config(
     symbol: str,
-    config: Dict[str, Any]
-) -> List[Dict[str, Any]]:
+    config: Dict[str, Any],
+    return_metadata: bool = False
+) -> Any:
     """Load candles based on config (synthetic or historical)
     
     Args:
         symbol: Trading symbol
         config: Experiment configuration
+        return_metadata: If True, return (candles, metadata) tuple
     
     Returns:
-        List of candle dictionaries
+        If return_metadata=False: List of candle dictionaries
+        If return_metadata=True: Tuple of (candles, metadata_dict)
     
     Raises:
         HistoricalDataError: If historical data requested but unavailable
@@ -301,6 +324,20 @@ def load_candles_from_config(
             seed=symbol_seed
         )
         
+        if return_metadata:
+            # For synthetic data, create basic metadata
+            metadata = {
+                'available_count': len(candles),
+                'used_count': len(candles),
+                'available_first_ts': candles[0]['timestamp'].isoformat() if candles else None,
+                'available_last_ts': candles[-1]['timestamp'].isoformat() if candles else None,
+                'used_first_ts': candles[0]['timestamp'].isoformat() if candles else None,
+                'used_last_ts': candles[-1]['timestamp'].isoformat() if candles else None,
+            }
+            return candles, metadata
+        
+        return candles
+        
     elif data_source == 'historical':
         # Load historical candles
         if 'historical_data' not in config:
@@ -316,19 +353,68 @@ def load_candles_from_config(
         
         # Get timeframe and date range
         timeframe = config['timeframes']['ltf']  # Use LTF as primary timeframe
-        start_date = config.get('start_date', '2024-01-01')
-        end_date = config.get('end_date', '2024-03-31')
+        
+        # Check if use_full_history is enabled
+        use_full_history = config.get('use_full_history', False)
+        
+        if use_full_history:
+            # Find common window across all required timeframes
+            required_tfs = [config['timeframes']['ltf']]
+            if config['timeframes'].get('htf'):
+                required_tfs.append(config['timeframes']['htf'])
+            if config['timeframes'].get('itf'):
+                required_tfs.append(config['timeframes']['itf'])
+            
+            try:
+                start_date, end_date = find_common_window(
+                    symbol=symbol,
+                    timeframes=required_tfs,
+                    data_dir=data_dir,
+                    exchange=exchange,
+                    market_type=market_type
+                )
+                
+                if not start_date or not end_date:
+                    raise HistoricalDataError(
+                        f"No common time window found for {symbol} across timeframes {required_tfs}"
+                    )
+                
+                print(f"  Using full history for {symbol}: {start_date} to {end_date}")
+                
+            except HistoricalDataError as e:
+                raise HistoricalDataError(
+                    f"Failed to determine full history window for {symbol}: {e}"
+                )
+        else:
+            # Use explicit start/end dates from config
+            start_date = config.get('start_date', '2024-01-01')
+            end_date = config.get('end_date', '2024-03-31')
         
         try:
-            candles = load_historical_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                start_date=start_date,
-                end_date=end_date,
-                data_dir=data_dir,
-                exchange=exchange,
-                market_type=market_type
-            )
+            if return_metadata:
+                candles, metadata = load_historical_candles(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    data_dir=data_dir,
+                    exchange=exchange,
+                    market_type=market_type,
+                    return_metadata=True
+                )
+                return candles, metadata
+            else:
+                candles = load_historical_candles(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    data_dir=data_dir,
+                    exchange=exchange,
+                    market_type=market_type,
+                    return_metadata=False
+                )
+                return candles
         except HistoricalDataError as e:
             # Re-raise with more context
             raise HistoricalDataError(
@@ -340,6 +426,7 @@ def load_candles_from_config(
                 f"  - timeframe: {timeframe}\n"
                 f"  - date_range: {start_date} to {end_date}\n"
                 f"  - data_dir: {data_dir}\n"
+                f"  - use_full_history: {use_full_history}\n"
             )
     
     else:
@@ -347,8 +434,7 @@ def load_candles_from_config(
             f"Invalid data_source: '{data_source}'. "
             f"Must be 'synthetic' or 'historical'."
         )
-    
-    return candles
+
 
 
 def execute_backtest_for_symbol(
@@ -356,7 +442,7 @@ def execute_backtest_for_symbol(
     candles: List[Dict[str, Any]],
     params: SupplyDemandParameters,
     initial_capital: float
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, List[float]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, List[float], DecisionFunnel]:
     """Execute backtest for a single symbol
     
     Args:
@@ -366,10 +452,15 @@ def execute_backtest_for_symbol(
         initial_capital: Starting capital
     
     Returns:
-        Tuple of (trades, zones, final_capital, equity_curve)
+        Tuple of (trades, zones, final_capital, equity_curve, decision_funnel)
     """
     # Detect all zones
     zones = detect_zones_dbr_rbd(candles, params)
+    
+    # Initialize decision funnel tracking
+    funnel = DecisionFunnel(symbol=symbol)
+    funnel.zones_detected = len(zones)
+    funnel.zones_fresh = len([z for z in zones if z.is_fresh])
     
     # Track capital and positions
     capital = initial_capital
@@ -396,6 +487,7 @@ def execute_backtest_for_symbol(
                 if params.ttl_bars and (idx - plan.placed_at_idx) >= params.ttl_bars:
                     plan.order_state = OrderState.CANCELLED
                     pending_plans.remove(plan)
+                    funnel.orders_expired_ttl += 1
                     # Note: TTL cancellation doesn't create a trade record (never filled)
                     continue
                 
@@ -409,6 +501,7 @@ def execute_backtest_for_symbol(
                 if filled:
                     plan.order_state = OrderState.FILLED
                     plan.filled_at_idx = idx
+                    funnel.orders_filled += 1
                     
                     # Move from pending to open positions
                     pending_plans.remove(plan)
@@ -515,7 +608,11 @@ def execute_backtest_for_symbol(
                     if zone_already_traded:
                         continue
                     
+                    # Candidate evaluation
+                    funnel.candidates_evaluated += 1
+                    
                     # Score the zone (simplified - use placeholder curve/trend)
+                    # Note: In full implementation, curve and trend rejection would be tracked here
                     score = odds_enhancer_score(
                         zone,
                         candle['close'],
@@ -525,20 +622,28 @@ def execute_backtest_for_symbol(
                         None  # opposing_zone
                     )
                     
-                    if score >= params.min_setup_score:
-                        # Build trade plan
-                        plan = build_trade_plan(
-                            zone,
-                            candle['close'],
-                            capital,
-                            params,
-                            None,  # opposing_zone simplified
-                            score
-                        )
-                        
-                        if plan and plan.r_multiple >= params.min_reward_risk:
-                            plan.placed_at_idx = idx
-                            pending_plans.append(plan)
+                    if score < params.min_setup_score:
+                        funnel.rejected_min_score += 1
+                        continue
+                    
+                    # Build trade plan
+                    plan = build_trade_plan(
+                        zone,
+                        candle['close'],
+                        capital,
+                        params,
+                        None,  # opposing_zone simplified
+                        score
+                    )
+                    
+                    if not plan or plan.r_multiple < params.min_reward_risk:
+                        funnel.rejected_min_rr += 1
+                        continue
+                    
+                    # Place order
+                    plan.placed_at_idx = idx
+                    pending_plans.append(plan)
+                    funnel.orders_placed += 1
     
     # Close any remaining open positions at EOD (end of data)
     for plan in open_positions:
@@ -586,7 +691,7 @@ def execute_backtest_for_symbol(
             'is_fresh': zone.is_fresh,
         })
     
-    return trades, zone_dicts, capital, equity_curve
+    return trades, zone_dicts, capital, equity_curve, funnel
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -696,17 +801,32 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     symbol_results = []
     all_trades = []
     all_zones = []
+    decision_funnels = []
     
     initial_capital = config['initial_capital']
+    
+    # Collect window metadata for reporting
+    used_window_global_start = None
+    used_window_global_end = None
     
     for symbol in config['symbols']:
         print(f"Running backtest for {symbol}...")
         
-        # Load candles (synthetic or historical based on config)
-        candles = load_candles_from_config(symbol, config)
+        # Load candles with metadata (synthetic or historical based on config)
+        candles, metadata = load_candles_from_config(symbol, config, return_metadata=True)
+        
+        # Track global window (intersection across all symbols)
+        if metadata['used_first_ts']:
+            used_ts = datetime.fromisoformat(metadata['used_first_ts'])
+            if not used_window_global_start or used_ts > used_window_global_start:
+                used_window_global_start = used_ts
+        if metadata['used_last_ts']:
+            used_ts = datetime.fromisoformat(metadata['used_last_ts'])
+            if not used_window_global_end or used_ts < used_window_global_end:
+                used_window_global_end = used_ts
         
         # Execute backtest
-        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
             symbol,
             candles,
             params,
@@ -716,7 +836,7 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         # Calculate max drawdown from equity curve
         max_drawdown = calculate_max_drawdown(equity_curve)
         
-        # Create data provenance record
+        # Enhanced data provenance with metadata
         data_provenance = {
             'first_timestamp': candles[0]['timestamp'].isoformat() if candles else None,
             'last_timestamp': candles[-1]['timestamp'].isoformat() if candles else None,
@@ -724,6 +844,13 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
             'last_close': candles[-1]['close'] if candles else None,
             'candle_count': len(candles),
             'checksum': calculate_candle_checksum(candles),
+            # Add new metadata fields
+            'available_first_ts': metadata.get('available_first_ts'),
+            'available_last_ts': metadata.get('available_last_ts'),
+            'available_count': metadata.get('available_count'),
+            'used_first_ts': metadata.get('used_first_ts'),
+            'used_last_ts': metadata.get('used_last_ts'),
+            'used_count': metadata.get('used_count'),
         }
         
         # Calculate symbol metrics
@@ -746,11 +873,13 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
             final_capital=final_capital,
             equity_curve=equity_curve,
             data_provenance=data_provenance,
+            decision_funnel=funnel,
         )
         
         symbol_results.append(symbol_result)
         all_trades.extend(trades)
         all_zones.extend(zones)
+        decision_funnels.append(funnel)
     
     # Guard-rail: Validate that multi-symbol runs have different data per symbol
     if len(config['symbols']) >= 2:
@@ -835,8 +964,26 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         clean=len(violations) == 0
     )
     
-    # Check metrics consistency
+    # Check metrics consistency and add window warnings
     metrics_warnings = check_metrics_consistency(symbol_results, all_trades)
+    
+    # Check for window utilization warnings (used < 80% of available)
+    for sr in symbol_results:
+        if sr.data_provenance.get('available_count') and sr.data_provenance.get('used_count'):
+            available = sr.data_provenance['available_count']
+            used = sr.data_provenance['used_count']
+            if available > 0 and used < 0.8 * available:
+                metrics_warnings.append({
+                    'type': 'low_window_utilization',
+                    'severity': 'info',
+                    'symbol': sr.symbol,
+                    'message': f"Symbol {sr.symbol} used only {used}/{available} candles ({used/available:.1%}). Consider use_full_history=true to use more data.",
+                    'details': {
+                        'available_count': available,
+                        'used_count': used,
+                        'utilization_pct': used / available,
+                    }
+                })
     
     # Create run manifest with enhanced data provenance
     git_info = get_git_info()
@@ -868,6 +1015,20 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         is_synthetic_data = False
         data_generation_info = None
     
+    # Build requested_window and used_window_global
+    requested_window = {
+        'start_date': config.get('start_date'),
+        'end_date': config.get('end_date'),
+        'use_full_history': config.get('use_full_history', False),
+    }
+    
+    used_window_global = {}
+    if used_window_global_start and used_window_global_end:
+        used_window_global = {
+            'start_ts': used_window_global_start.isoformat(),
+            'end_ts': used_window_global_end.isoformat(),
+        }
+    
     run_manifest = {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'git_commit': git_info['commit_hash'],
@@ -875,6 +1036,9 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         'config_file': config_path,
         'config_hash': hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest(),
+        # Window provenance
+        'requested_window': requested_window,
+        'used_window_global': used_window_global,
         # Data provenance fields
         'data_source': data_source,
         'datasource_name': datasource_name,
@@ -898,6 +1062,7 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         integrity_report=integrity_report,
         run_manifest=run_manifest,
         metrics_warnings=metrics_warnings,
+        decision_funnels=decision_funnels,
     )
 
 
@@ -997,6 +1162,46 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     with open(artifacts_dir / 'metrics_warnings.json', 'w') as f:
         json.dump(metrics_warnings_data, f, indent=2)
     
+    # Write decision_funnel.json
+    funnel_data = {
+        'per_symbol': [asdict(f) for f in result.decision_funnels],
+        'aggregate': {
+            'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
+            'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
+            'candidates_evaluated': sum(f.candidates_evaluated for f in result.decision_funnels),
+            'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
+            'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
+            'rejected_min_score': sum(f.rejected_min_score for f in result.decision_funnels),
+            'rejected_min_rr': sum(f.rejected_min_rr for f in result.decision_funnels),
+            'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
+            'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
+            'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
+        }
+    }
+    with open(artifacts_dir / 'decision_funnel.json', 'w') as f:
+        json.dump(funnel_data, f, indent=2)
+    
+    # Print compact decision funnel table
+    print("\n" + "=" * 80)
+    print("DECISION FUNNEL")
+    print("=" * 80)
+    agg = funnel_data['aggregate']
+    print(f"Zones Detected:        {agg['zones_detected']}")
+    print(f"  └─ Fresh:            {agg['zones_fresh']}")
+    print(f"Candidates Evaluated:  {agg['candidates_evaluated']}")
+    if agg['rejected_curve'] > 0:
+        print(f"  ├─ Rejected (Curve): {agg['rejected_curve']}")
+    if agg['rejected_trend'] > 0:
+        print(f"  ├─ Rejected (Trend): {agg['rejected_trend']}")
+    if agg['rejected_min_score'] > 0:
+        print(f"  ├─ Rejected (Score): {agg['rejected_min_score']}")
+    if agg['rejected_min_rr'] > 0:
+        print(f"  └─ Rejected (Min R): {agg['rejected_min_rr']}")
+    print(f"Orders Placed:         {agg['orders_placed']}")
+    print(f"  ├─ Filled:           {agg['orders_filled']}")
+    print(f"  └─ Expired (TTL):    {agg['orders_expired_ttl']}")
+    print("=" * 80)
+    
     print(f"\nArtifacts written to: {artifacts_dir}")
     print(f"  - summary.json ({len(result.symbol_results)} symbols)")
     print(f"  - trades.csv ({len(result.all_trades)} trades)")
@@ -1004,6 +1209,7 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     print(f"  - run_manifest.json")
     print(f"  - violations.json ({len(result.integrity_report.violations)} violations)")
     print(f"  - metrics_warnings.json ({len(result.metrics_warnings)} warnings)")
+    print(f"  - decision_funnel.json")
 
 
 if __name__ == "__main__":

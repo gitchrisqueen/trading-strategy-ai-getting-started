@@ -13,6 +13,15 @@
 name: "sd_v1_futures_stress"
 description: "S&D V1 stress test on mid-cap altcoin futures/perpetual contracts"
 
+# Data source: "historical"
+data_source: "historical"
+
+# Historical data configuration
+historical_data:
+  exchange: "binance"
+  market_type: "futures"
+  data_dir: "./data"
+
 # FUTURES symbols (perpetual contracts)
 # These are formatted for Binance/Bybit futures notation
 # Selected for higher volatility and lower liquidity to stress test the strategy
@@ -24,8 +33,12 @@ symbols:
   - "NEARUSDT"   # Near Protocol perpetual
 
 # Time range for backtest
+# Option 1: Use explicit dates (default)
 start_date: "2024-01-01"
 end_date: "2024-03-31"
+
+# Option 2: Use full available history (uncomment to enable)
+# use_full_history: true
 
 # Multi-timeframe configuration
 timeframes:
