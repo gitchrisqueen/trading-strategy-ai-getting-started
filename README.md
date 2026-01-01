@@ -39,6 +39,7 @@ Comprehensive documentation for this repository:
 - **[Project Context](docs/PROJECT_CONTEXT.md)** - Project overview, setup instructions, and where to find key implementations
 - **[Repository Map](docs/REPO_MAP.md)** - Complete map of repo structure with descriptions of key files and folders
 - **[Supply & Demand V1 Strategy](strategies/supply_demand_v1/README.md)** - Complete specification of the S&D zone-based trading strategy
+- **[Data Pipeline Guide](docs/DATA_PIPELINE.md)** - Automated data acquisition for Binance USDT-M futures with caching and validation
 - **[Copilot Workflow Guidelines](docs/COPILOT_WORKFLOW.md)** - Development workflow and PR best practices for future contributions
 - **[GitHub Copilot Instructions](.github/copilot-instructions.md)** - Repository-wide and path-specific instructions for Copilot-assisted development
 

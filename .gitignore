@@ -41,3 +41,6 @@ artifacts/
 data/binance_futures/*.csv
 data/*_futures/*.csv
 data/*_spot/*.csv
+
+# Data pipeline cache
+data/.cache/
