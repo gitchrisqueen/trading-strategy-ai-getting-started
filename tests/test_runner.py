@@ -306,7 +306,7 @@ class TestSymbolBacktest:
         params = SupplyDemandParameters()
         candles = generate_synthetic_candles('BTC/USDT', 200, seed=42)
         
-        trades, zones, final_capital = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
             'BTC/USDT',
             candles,
             params,
@@ -317,9 +317,13 @@ class TestSymbolBacktest:
         assert isinstance(trades, list)
         assert isinstance(zones, list)
         assert isinstance(final_capital, float)
+        assert isinstance(equity_curve, list)
         
         # Check zones were detected
         assert len(zones) > 0
+        
+        # Check equity curve starts with initial capital
+        assert equity_curve[0] == 10000.0
         
         # Check zone structure
         for zone in zones:
