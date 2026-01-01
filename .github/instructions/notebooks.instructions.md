@@ -529,7 +529,7 @@ This section detects **Drop-Base-Rally** (demand) and **Rally-Base-Drop** (suppl
 - **Boring candle**: Body ≤ 50% of range
 - **Exciting candle**: Body > 50% of range
 
-See [Supply & Demand V1 README](../strategies/supply_demand_v1/README.md) for full specification.
+See [Supply & Demand V1 README](../../strategies/supply_demand_v1/README.md) for full specification.
 ```
 
 ## Notebook Quality Checklist
