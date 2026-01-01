@@ -1,0 +1,37 @@
+{
+  "XRPUSDT_15m": {
+    "last_updated": "2026-01-01T14:06:04.992591+00:00",
+    "first_ts": "2024-01-01 00:00:00",
+    "last_ts": "2024-01-11 09:45:00",
+    "candle_count": 1000,
+    "checksum": "d2d60709989f9235940e70648c291274"
+  },
+  "SOLUSDT_15m": {
+    "last_updated": "2026-01-01T14:06:04.996100+00:00",
+    "first_ts": "2024-01-01 00:00:00",
+    "last_ts": "2024-01-11 09:45:00",
+    "candle_count": 1000,
+    "checksum": "aedb33533b427c857b817a66878e7782"
+  },
+  "BNBUSDT_15m": {
+    "last_updated": "2026-01-01T14:06:04.999336+00:00",
+    "first_ts": "2024-01-01 00:00:00",
+    "last_ts": "2024-01-11 09:45:00",
+    "candle_count": 1000,
+    "checksum": "569cf742bc40dcbd20e003f41c74a3be"
+  },
+  "ETHUSDT_15m": {
+    "last_updated": "2026-01-01T14:06:05.002571+00:00",
+    "first_ts": "2024-01-01 00:00:00",
+    "last_ts": "2024-01-11 09:45:00",
+    "candle_count": 1000,
+    "checksum": "9e35be26095f4739e72bb7e2a33856c3"
+  },
+  "BTCUSDT_15m": {
+    "last_updated": "2026-01-01T14:06:05.005830+00:00",
+    "first_ts": "2024-01-01 00:00:00",
+    "last_ts": "2024-01-11 09:45:00",
+    "candle_count": 1000,
+    "checksum": "9538dbde5c1dd14641432ea0be6f19a5"
+  }
+}
