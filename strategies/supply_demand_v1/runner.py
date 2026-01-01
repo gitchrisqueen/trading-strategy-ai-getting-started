@@ -69,6 +69,98 @@ from strategies.supply_demand_v1.integrity import (
 )
 
 
+def calculate_max_drawdown(equity_curve: List[float]) -> float:
+    """Calculate maximum drawdown from an equity curve
+    
+    Args:
+        equity_curve: List of equity values over time
+    
+    Returns:
+        Maximum drawdown as a positive number (0.0 if no drawdown)
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        return 0.0
+    
+    max_drawdown = 0.0
+    peak = equity_curve[0]
+    
+    for equity in equity_curve:
+        if equity > peak:
+            peak = equity
+        
+        drawdown = peak - equity
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+    
+    return max_drawdown
+
+
+def calculate_candle_checksum(candles: List[Dict[str, Any]]) -> str:
+    """Calculate checksum/hash of close prices for data verification
+    
+    Args:
+        candles: List of OHLC candles
+    
+    Returns:
+        MD5 hash of close prices as hex string
+    """
+    if not candles:
+        return ""
+    
+    close_prices = [str(c['close']) for c in candles]
+    close_string = ','.join(close_prices)
+    return hashlib.md5(close_string.encode()).hexdigest()
+
+
+def check_metrics_consistency(
+    symbol_results: List['SymbolResult'],
+    all_trades: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Check for impossible or likely-bug metric situations
+    
+    Args:
+        symbol_results: Per-symbol backtest results
+        all_trades: All trades from backtest
+    
+    Returns:
+        List of warning dictionaries
+    """
+    warnings = []
+    
+    for sr in symbol_results:
+        # Warning 1: max_drawdown == 0.0 while trades_filled > 0
+        if sr.max_drawdown == 0.0 and sr.trades_filled > 0:
+            warnings.append({
+                'type': 'zero_drawdown_with_trades',
+                'severity': 'warning',
+                'symbol': sr.symbol,
+                'message': f"Symbol {sr.symbol} has {sr.trades_filled} filled trades but max_drawdown is 0.0. This is unlikely unless all trades were profitable.",
+                'details': {
+                    'trades_filled': sr.trades_filled,
+                    'max_drawdown': sr.max_drawdown,
+                    'total_pnl': sr.total_pnl,
+                }
+            })
+        
+        # Warning 2: abs(avg_r_realized) < 0.02 while abs(total_pnl) is large
+        # Define "large" as > 5% of a typical initial capital (e.g., $10k -> $500)
+        large_pnl_threshold = 500.0
+        if sr.trades_filled > 0 and abs(sr.avg_r_realized) < 0.02 and abs(sr.total_pnl) > large_pnl_threshold:
+            warnings.append({
+                'type': 'low_r_with_large_pnl',
+                'severity': 'warning',
+                'symbol': sr.symbol,
+                'message': f"Symbol {sr.symbol} has large P&L (${sr.total_pnl:.2f}) but avg R realized is near zero ({sr.avg_r_realized:.2f}R). Check R calculation or position sizing.",
+                'details': {
+                    'avg_r_realized': sr.avg_r_realized,
+                    'total_pnl': sr.total_pnl,
+                    'trades_filled': sr.trades_filled,
+                }
+            })
+    
+    return warnings
+
+
 @dataclass
 class SymbolResult:
     """Results for a single symbol backtest"""
@@ -84,6 +176,9 @@ class SymbolResult:
     avg_r_realized: float
     max_drawdown: float
     final_capital: float
+    equity_curve: List[float]  # Track full equity curve
+    # Data provenance
+    data_provenance: Dict[str, Any]  # first/last timestamp, close prices, checksum, etc.
 
 
 @dataclass
@@ -96,6 +191,7 @@ class ExperimentResult:
     aggregate_metrics: Dict[str, Any]
     integrity_report: IntegrityReport
     run_manifest: Dict[str, Any]
+    metrics_warnings: List[Dict[str, Any]]  # Consistency warnings
 
 
 def generate_synthetic_candles(
@@ -171,7 +267,7 @@ def execute_backtest_for_symbol(
     candles: List[Dict[str, Any]],
     params: SupplyDemandParameters,
     initial_capital: float
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, List[float]]:
     """Execute backtest for a single symbol
     
     Args:
@@ -181,7 +277,7 @@ def execute_backtest_for_symbol(
         initial_capital: Starting capital
     
     Returns:
-        Tuple of (trades, zones, final_capital)
+        Tuple of (trades, zones, final_capital, equity_curve)
     """
     # Detect all zones
     zones = detect_zones_dbr_rbd(candles, params)
@@ -191,6 +287,9 @@ def execute_backtest_for_symbol(
     trades = []
     pending_plans = []  # Plans with pending orders
     open_positions = []  # Plans with filled orders (active positions)
+    
+    # Track equity curve for drawdown calculation
+    equity_curve = [initial_capital]  # Start with initial capital
     
     # Simulate backtest bar by bar
     for idx in range(len(candles)):
@@ -300,6 +399,7 @@ def execute_backtest_for_symbol(
                 
                 # Update capital
                 capital += pnl
+                equity_curve.append(capital)
                 
                 # Remove from open positions
                 open_positions.remove(plan)
@@ -379,6 +479,7 @@ def execute_backtest_for_symbol(
                 break
         
         capital += pnl
+        equity_curve.append(capital)
     
     # Convert zones to dicts for output
     zone_dicts = []
@@ -396,7 +497,7 @@ def execute_backtest_for_symbol(
             'is_fresh': zone.is_fresh,
         })
     
-    return trades, zone_dicts, capital
+    return trades, zone_dicts, capital, equity_curve
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -528,12 +629,25 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         )
         
         # Execute backtest
-        trades, zones, final_capital = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
             symbol,
             candles,
             params,
             initial_capital
         )
+        
+        # Calculate max drawdown from equity curve
+        max_drawdown = calculate_max_drawdown(equity_curve)
+        
+        # Create data provenance record
+        data_provenance = {
+            'first_timestamp': candles[0]['timestamp'].isoformat() if candles else None,
+            'last_timestamp': candles[-1]['timestamp'].isoformat() if candles else None,
+            'first_close': candles[0]['close'] if candles else None,
+            'last_close': candles[-1]['close'] if candles else None,
+            'candle_count': len(candles),
+            'checksum': calculate_candle_checksum(candles),
+        }
         
         # Calculate symbol metrics
         filled_trades = [t for t in trades if t['realized_R'] is not None]
@@ -551,8 +665,10 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
             total_pnl=sum(t['pnl'] for t in filled_trades),
             win_rate=len(won_trades) / len(filled_trades) if filled_trades else 0.0,
             avg_r_realized=sum(t['realized_R'] for t in filled_trades) / len(filled_trades) if filled_trades else 0.0,
-            max_drawdown=0.0,  # Simplified for now
-            final_capital=final_capital
+            max_drawdown=max_drawdown,
+            final_capital=final_capital,
+            equity_curve=equity_curve,
+            data_provenance=data_provenance,
         )
         
         symbol_results.append(symbol_result)
@@ -596,13 +712,15 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     all_won_trades = [t for t in all_filled_trades if t['pnl'] > 0]
     
     aggregate_metrics = {
+        'accounting_mode': 'per_symbol_independent',  # Each symbol backtested independently
         'total_symbols': len(config['symbols']),
         'total_trades': len(all_trades),
         'total_filled': len(all_filled_trades),
         'total_won': len(all_won_trades),
         'total_lost': len(all_filled_trades) - len(all_won_trades),
         'overall_win_rate': len(all_won_trades) / len(all_filled_trades) if all_filled_trades else 0.0,
-        'overall_pnl': sum(t['pnl'] for t in all_filled_trades),
+        'sum_of_symbol_pnls': sum(t['pnl'] for t in all_filled_trades),  # Renamed from overall_pnl
+        'overall_pnl': sum(t['pnl'] for t in all_filled_trades),  # Keep for backward compatibility
         'avg_r_realized': sum(t['realized_R'] for t in all_filled_trades) / len(all_filled_trades) if all_filled_trades else 0.0,
     }
     
@@ -640,8 +758,17 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         clean=len(violations) == 0
     )
     
-    # Create run manifest
+    # Check metrics consistency
+    metrics_warnings = check_metrics_consistency(symbol_results, all_trades)
+    
+    # Create run manifest with enhanced data provenance
     git_info = get_git_info()
+    
+    # Collect per-symbol data provenance
+    symbol_data_provenance = {}
+    for sr in symbol_results:
+        symbol_data_provenance[sr.symbol] = sr.data_provenance
+    
     run_manifest = {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'git_commit': git_info['commit_hash'],
@@ -649,6 +776,17 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         'config_file': config_path,
         'config_hash': hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest(),
+        # Data provenance fields
+        'datasource_name': 'synthetic',  # Could be 'TradingStrategy', 'exchange', etc.
+        'is_synthetic_data': True,  # Explicitly set
+        'candle_timeframe': params.ltf_tf,  # Primary timeframe for zone detection
+        'data_generation': {
+            'generator_module': 'strategies.supply_demand_v1.runner.generate_synthetic_candles',
+            'base_seed': config['data_generation']['seed'],
+            'num_candles': config['data_generation']['num_candles'],
+            'volatility': config['data_generation']['volatility'],
+        },
+        'symbol_data_provenance': symbol_data_provenance,
     }
     
     return ExperimentResult(
@@ -658,7 +796,8 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         all_zones=all_zones,
         aggregate_metrics=aggregate_metrics,
         integrity_report=integrity_report,
-        run_manifest=run_manifest
+        run_manifest=run_manifest,
+        metrics_warnings=metrics_warnings,
     )
 
 
@@ -670,9 +809,16 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
         artifacts_dir: Directory to write artifacts to
     """
     # Write summary.json
+    # Convert symbol results to dict but exclude equity_curve (too large for JSON)
+    symbol_results_for_json = []
+    for sr in result.symbol_results:
+        sr_dict = asdict(sr)
+        sr_dict.pop('equity_curve', None)  # Remove equity curve from JSON output
+        symbol_results_for_json.append(sr_dict)
+    
     summary = {
         'aggregate_metrics': result.aggregate_metrics,
-        'symbol_results': [asdict(sr) for sr in result.symbol_results],
+        'symbol_results': symbol_results_for_json,
     }
     with open(artifacts_dir / 'summary.json', 'w') as f:
         json.dump(summary, f, indent=2)
@@ -743,12 +889,21 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     with open(artifacts_dir / 'violations.json', 'w') as f:
         json.dump(violations_data, f, indent=2)
     
+    # Write metrics_warnings.json
+    metrics_warnings_data = {
+        'total_warnings': len(result.metrics_warnings),
+        'warnings': result.metrics_warnings,
+    }
+    with open(artifacts_dir / 'metrics_warnings.json', 'w') as f:
+        json.dump(metrics_warnings_data, f, indent=2)
+    
     print(f"\nArtifacts written to: {artifacts_dir}")
     print(f"  - summary.json ({len(result.symbol_results)} symbols)")
     print(f"  - trades.csv ({len(result.all_trades)} trades)")
     print(f"  - zones.csv ({len(result.all_zones)} zones)")
     print(f"  - run_manifest.json")
     print(f"  - violations.json ({len(result.integrity_report.violations)} violations)")
+    print(f"  - metrics_warnings.json ({len(result.metrics_warnings)} warnings)")
 
 
 if __name__ == "__main__":
