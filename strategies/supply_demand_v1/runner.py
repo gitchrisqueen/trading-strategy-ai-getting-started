@@ -68,6 +68,11 @@ from strategies.supply_demand_v1.integrity import (
     ViolationType,
 )
 
+from strategies.supply_demand_v1.data_loader import (
+    load_historical_candles,
+    HistoricalDataError,
+)
+
 
 def calculate_max_drawdown(equity_curve: List[float]) -> float:
     """Calculate maximum drawdown from an equity curve
@@ -258,6 +263,90 @@ def generate_synthetic_candles(
         
         current_price = close_price
         timestamp = timestamp + timedelta(minutes=15)  # 15m candles
+    
+    return candles
+
+
+def load_candles_from_config(
+    symbol: str,
+    config: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Load candles based on config (synthetic or historical)
+    
+    Args:
+        symbol: Trading symbol
+        config: Experiment configuration
+    
+    Returns:
+        List of candle dictionaries
+    
+    Raises:
+        HistoricalDataError: If historical data requested but unavailable
+        ValueError: If data_source is invalid
+    """
+    data_source = config.get('data_source', 'synthetic')
+    
+    if data_source == 'synthetic':
+        # Generate synthetic candles
+        base_seed = config['data_generation']['seed']
+        if base_seed is not None:
+            symbol_seed = hash(symbol + str(base_seed)) % (2**31)
+        else:
+            symbol_seed = None
+        
+        candles = generate_synthetic_candles(
+            symbol,
+            num_candles=config['data_generation']['num_candles'],
+            volatility=config['data_generation']['volatility'],
+            seed=symbol_seed
+        )
+        
+    elif data_source == 'historical':
+        # Load historical candles
+        if 'historical_data' not in config:
+            raise ValueError(
+                "data_source is 'historical' but 'historical_data' section is missing in config. "
+                "Please add 'historical_data' with exchange, market_type, and data_dir fields."
+            )
+        
+        hist_config = config['historical_data']
+        exchange = hist_config.get('exchange', 'binance')
+        market_type = hist_config.get('market_type', 'futures')
+        data_dir = Path(hist_config.get('data_dir', './data'))
+        
+        # Get timeframe and date range
+        timeframe = config['timeframes']['ltf']  # Use LTF as primary timeframe
+        start_date = config.get('start_date', '2024-01-01')
+        end_date = config.get('end_date', '2024-03-31')
+        
+        try:
+            candles = load_historical_candles(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                data_dir=data_dir,
+                exchange=exchange,
+                market_type=market_type
+            )
+        except HistoricalDataError as e:
+            # Re-raise with more context
+            raise HistoricalDataError(
+                f"Failed to load historical data for {symbol}:\n{e}\n\n"
+                f"Config settings:\n"
+                f"  - data_source: {data_source}\n"
+                f"  - exchange: {exchange}\n"
+                f"  - market_type: {market_type}\n"
+                f"  - timeframe: {timeframe}\n"
+                f"  - date_range: {start_date} to {end_date}\n"
+                f"  - data_dir: {data_dir}\n"
+            )
+    
+    else:
+        raise ValueError(
+            f"Invalid data_source: '{data_source}'. "
+            f"Must be 'synthetic' or 'historical'."
+        )
     
     return candles
 
@@ -613,20 +702,8 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     for symbol in config['symbols']:
         print(f"Running backtest for {symbol}...")
         
-        # Generate synthetic candles with symbol-specific seed
-        # Use hash of symbol + base seed to ensure different data per symbol
-        base_seed = config['data_generation']['seed']
-        if base_seed is not None:
-            symbol_seed = hash(symbol + str(base_seed)) % (2**31)  # Keep seed in valid range
-        else:
-            symbol_seed = None
-        
-        candles = generate_synthetic_candles(
-            symbol,
-            num_candles=config['data_generation']['num_candles'],
-            volatility=config['data_generation']['volatility'],
-            seed=symbol_seed
-        )
+        # Load candles (synthetic or historical based on config)
+        candles = load_candles_from_config(symbol, config)
         
         # Execute backtest
         trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
@@ -769,6 +846,28 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     for sr in symbol_results:
         symbol_data_provenance[sr.symbol] = sr.data_provenance
     
+    # Determine data source fields based on config
+    data_source = config.get('data_source', 'synthetic')
+    
+    if data_source == 'synthetic':
+        datasource_name = 'synthetic'
+        is_synthetic_data = True
+        exchange = None
+        market_type = None
+        data_generation_info = {
+            'generator_module': 'strategies.supply_demand_v1.runner.generate_synthetic_candles',
+            'base_seed': config['data_generation']['seed'],
+            'num_candles': config['data_generation']['num_candles'],
+            'volatility': config['data_generation']['volatility'],
+        }
+    else:  # historical
+        hist_config = config.get('historical_data', {})
+        exchange = hist_config.get('exchange', 'binance')
+        market_type = hist_config.get('market_type', 'futures')
+        datasource_name = f"{exchange}_{market_type}"
+        is_synthetic_data = False
+        data_generation_info = None
+    
     run_manifest = {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'git_commit': git_info['commit_hash'],
@@ -777,17 +876,18 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         'config_file': config_path,
         'config_hash': hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest(),
         # Data provenance fields
-        'datasource_name': 'synthetic',  # Could be 'TradingStrategy', 'exchange', etc.
-        'is_synthetic_data': True,  # Explicitly set
+        'data_source': data_source,
+        'datasource_name': datasource_name,
+        'is_synthetic_data': is_synthetic_data,
+        'exchange': exchange,
+        'market_type': market_type,
         'candle_timeframe': params.ltf_tf,  # Primary timeframe for zone detection
-        'data_generation': {
-            'generator_module': 'strategies.supply_demand_v1.runner.generate_synthetic_candles',
-            'base_seed': config['data_generation']['seed'],
-            'num_candles': config['data_generation']['num_candles'],
-            'volatility': config['data_generation']['volatility'],
-        },
         'symbol_data_provenance': symbol_data_provenance,
     }
+    
+    # Add data_generation info for synthetic data
+    if data_generation_info:
+        run_manifest['data_generation'] = data_generation_info
     
     return ExperimentResult(
         config=config,

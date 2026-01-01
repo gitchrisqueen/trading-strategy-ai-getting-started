@@ -12,6 +12,15 @@
 name: "sd_v1_futures_core"
 description: "S&D V1 backtest on core futures/perpetual contracts"
 
+# Data source: "synthetic" or "historical"
+data_source: "historical"
+
+# Historical data configuration (used when data_source: "historical")
+historical_data:
+  exchange: "binance"
+  market_type: "futures"
+  data_dir: "./data"
+
 # FUTURES symbols (perpetual contracts)
 # These are formatted for Binance/Bybit futures notation
 symbols:
