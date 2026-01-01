@@ -847,14 +847,29 @@ python scripts/run_supply_demand_v1.py --config experiments/sd_v1_default.yaml
 
 # Run wide symbols experiment (15 symbols)
 python scripts/run_supply_demand_v1.py --config experiments/sd_v1_wide_symbols.yaml
+
+# Run futures core experiment (5 core futures pairs)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_futures_core.yaml
+
+# Run futures expanded experiment (10 futures pairs)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_futures_expanded.yaml
+
+# Run futures stress test (5 mid-cap altcoin futures)
+python scripts/run_supply_demand_v1.py --config experiments/sd_v1_futures_stress.yaml
 ```
 
 ### Configuration Files
 
 Experiment configurations are stored in `./experiments/`:
 
+**General Configs:**
 - `sd_v1_default.yaml` - Basic configuration with 5 symbols for quick testing
 - `sd_v1_wide_symbols.yaml` - Comprehensive configuration with 15 symbols
+
+**Futures/Perpetual Configs:**
+- `sd_v1_futures_core.yaml` - 5 core futures pairs (BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT)
+- `sd_v1_futures_expanded.yaml` - 10 major futures pairs (includes AVAXUSDT, ADAUSDT, LINKUSDT, DOGEUSDT, MATICUSDT)
+- `sd_v1_futures_stress.yaml` - 5 mid-cap altcoin futures for stress testing (OPUSDT, ARBUSDT, APTUSDT, SUIUSDT, NEARUSDT)
 
 Each configuration includes:
 - **Symbols**: List of trading pairs to backtest
