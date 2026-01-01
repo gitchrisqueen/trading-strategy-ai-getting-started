@@ -6,6 +6,26 @@ The Supply & Demand (S&D) V1 strategy is a zone-based trading approach that iden
 
 **Core Premise**: Large institutions (market makers, banks, hedge funds) leave footprints in the form of price patterns. By identifying where they accumulated or distributed positions, we can trade when price returns to these areas.
 
+## Intended Market: Futures/Perpetual Contracts
+
+**This strategy is designed for futures and perpetual contract markets.**
+
+The strategy assumes:
+- **Bidirectional trading capability**: Ability to go both LONG (buy) and SHORT (sell) with equal ease
+- **Sufficient volatility**: Markets with enough price movement to form clear supply/demand zones
+- **Leverage availability**: Ability to size positions appropriately using leverage (though conservative position sizing is recommended)
+- **High liquidity**: Tight spreads and minimal slippage on entry/exit
+
+### Not Intended for Spot-Only Markets
+
+This strategy is **not optimized** for spot-only trading environments where:
+- Short selling is restricted or unavailable
+- Markets lack sufficient volatility for zone formation
+- Trading costs prohibit frequent entries/exits
+- Leverage is not available for position sizing
+
+For best results, apply this strategy to liquid futures/perpetual pairs on exchanges like Binance Futures, Bybit, OKX, or similar derivative platforms.
+
 ## Key Terminology
 
 | Term | Definition |

@@ -455,6 +455,18 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
     # Load configuration
     config = load_config(config_path)
     
+    # Log if this is a futures config (optional validation)
+    config_name = config.get('name', Path(config_path).stem)
+    if 'futures' in config_name.lower():
+        print("=" * 80)
+        print("FUTURES/PERPETUAL CONTRACT MODE DETECTED")
+        print("=" * 80)
+        print(f"Config: {config_name}")
+        print("This strategy is designed for futures/perpetual contracts.")
+        print("Assumes: Bidirectional trading (LONG/SHORT), leverage, high liquidity.")
+        print("=" * 80)
+        print()
+    
     # Create parameters from config
     params = SupplyDemandParameters(
         boring_body_ratio=config['candle_classification']['boring_body_ratio'],
