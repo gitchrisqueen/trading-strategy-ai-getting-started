@@ -148,12 +148,13 @@ def validate_candles(
 def load_historical_candles(
     symbol: str,
     timeframe: str,
-    start_date: str,
-    end_date: str,
-    data_dir: Path,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    data_dir: Path = Path("./data"),
     exchange: str = "binance",
-    market_type: str = "futures"
-) -> List[Dict[str, Any]]:
+    market_type: str = "futures",
+    return_metadata: bool = False
+) -> Any:
     """Load historical candles from CSV file
     
     Expected file structure:
@@ -174,15 +175,21 @@ def load_historical_candles(
     Args:
         symbol: Trading symbol (e.g., "BTCUSDT")
         timeframe: Candle timeframe (e.g., "15m", "1h", "4h")
-        start_date: Start date (ISO format: "2024-01-01")
-        end_date: End date (ISO format: "2024-03-31")
+        start_date: Start date (ISO format: "2024-01-01"), if None loads all
+        end_date: End date (ISO format: "2024-03-31"), if None loads all
         data_dir: Root data directory
         exchange: Exchange name (default: "binance")
         market_type: Market type (default: "futures")
+        return_metadata: If True, returns (candles, metadata) tuple
     
     Returns:
-        List of candle dictionaries with keys:
-            open, high, low, close, volume, timestamp, symbol
+        If return_metadata=False: List of candle dictionaries
+        If return_metadata=True: Tuple of (candles, metadata_dict)
+        
+        Metadata dict contains:
+            - available_first_ts, available_last_ts, available_count
+            - used_first_ts, used_last_ts, used_count
+            - file_path
     
     Raises:
         HistoricalDataError: If file not found or data is invalid
@@ -199,17 +206,27 @@ def load_historical_candles(
             f"Please ensure historical data is downloaded and placed in the correct location."
         )
     
-    # Parse date range
-    try:
-        start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
-        end_dt = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
-    except ValueError as e:
-        raise HistoricalDataError(
-            f"Invalid date format. Expected ISO format (YYYY-MM-DD): {e}"
-        )
+    # Parse date range (None means no filtering)
+    start_dt = None
+    end_dt = None
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            raise HistoricalDataError(
+                f"Invalid start_date format. Expected ISO format (YYYY-MM-DD): {e}"
+            )
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            raise HistoricalDataError(
+                f"Invalid end_date format. Expected ISO format (YYYY-MM-DD): {e}"
+            )
     
-    # Load and parse CSV
-    candles = []
+    # Load and parse CSV (first pass: load ALL candles to get available window)
+    all_candles = []
+    filtered_candles = []
     try:
         with open(file_path, 'r') as f:
             reader = csv.DictReader(f)
@@ -247,10 +264,6 @@ def load_historical_candles(
                     # Parse timestamp (use whichever column is present)
                     ts = parse_timestamp(row[date_col])
                     
-                    # Filter by date range
-                    if ts < start_dt or ts > end_dt:
-                        continue
-                    
                     # Parse OHLCV
                     candle = {
                         'timestamp': ts,
@@ -261,7 +274,15 @@ def load_historical_candles(
                         'volume': float(row['volume']),
                         'symbol': symbol,
                     }
-                    candles.append(candle)
+                    all_candles.append(candle)
+                    
+                    # Also track filtered candles if date range specified
+                    if start_dt and ts < start_dt:
+                        continue
+                    if end_dt and ts > end_dt:
+                        continue
+                    
+                    filtered_candles.append(candle)
                     
                 except (ValueError, KeyError) as e:
                     # Skip malformed rows but log warning
@@ -277,10 +298,109 @@ def load_historical_candles(
             f"Error reading historical data from {file_path}: {e}"
         )
     
-    # Validate loaded candles
-    validate_candles(candles, symbol, min_candles=100)
+    # Choose which candles to return/validate
+    candles_to_use = filtered_candles if (start_dt or end_dt) else all_candles
     
-    return candles
+    # Validate loaded candles
+    validate_candles(candles_to_use, symbol, min_candles=100)
+    
+    # Build metadata if requested
+    if return_metadata:
+        metadata = {
+            'file_path': str(file_path),
+            'available_count': len(all_candles),
+            'used_count': len(candles_to_use),
+        }
+        
+        if all_candles:
+            metadata['available_first_ts'] = all_candles[0]['timestamp'].isoformat()
+            metadata['available_last_ts'] = all_candles[-1]['timestamp'].isoformat()
+        else:
+            metadata['available_first_ts'] = None
+            metadata['available_last_ts'] = None
+            
+        if candles_to_use:
+            metadata['used_first_ts'] = candles_to_use[0]['timestamp'].isoformat()
+            metadata['used_last_ts'] = candles_to_use[-1]['timestamp'].isoformat()
+        else:
+            metadata['used_first_ts'] = None
+            metadata['used_last_ts'] = None
+        
+        return candles_to_use, metadata
+    
+    return candles_to_use
+
+
+def find_common_window(
+    symbol: str,
+    timeframes: List[str],
+    data_dir: Path,
+    exchange: str = "binance",
+    market_type: str = "futures"
+) -> Tuple[Optional[str], Optional[str]]:
+    """Find the common overlapping time window across multiple timeframes
+    
+    Useful when use_full_history=true to determine the maximum window
+    that has data available for all required timeframes.
+    
+    Args:
+        symbol: Trading symbol
+        timeframes: List of timeframes to check (e.g., ["15m", "1h", "4h"])
+        data_dir: Root data directory
+        exchange: Exchange name
+        market_type: Market type
+    
+    Returns:
+        Tuple of (start_date, end_date) in ISO format, or (None, None) if no overlap
+    
+    Raises:
+        HistoricalDataError: If any required file is missing
+    """
+    if not timeframes:
+        return None, None
+    
+    # Load metadata for each timeframe
+    all_metadata = []
+    for tf in timeframes:
+        try:
+            _, metadata = load_historical_candles(
+                symbol=symbol,
+                timeframe=tf,
+                start_date=None,
+                end_date=None,
+                data_dir=data_dir,
+                exchange=exchange,
+                market_type=market_type,
+                return_metadata=True
+            )
+            all_metadata.append(metadata)
+        except HistoricalDataError:
+            # If any timeframe is missing, we can't determine common window
+            raise
+    
+    # Find the latest start and earliest end across all timeframes
+    start_dates = []
+    end_dates = []
+    
+    for metadata in all_metadata:
+        if metadata['available_first_ts']:
+            start_dates.append(datetime.fromisoformat(metadata['available_first_ts']))
+        if metadata['available_last_ts']:
+            end_dates.append(datetime.fromisoformat(metadata['available_last_ts']))
+    
+    if not start_dates or not end_dates:
+        return None, None
+    
+    # Common window is: max(all_starts) to min(all_ends)
+    common_start = max(start_dates)
+    common_end = min(end_dates)
+    
+    # Check if there's actually overlap
+    if common_start > common_end:
+        return None, None
+    
+    # Return as ISO date strings (date only, not datetime)
+    return common_start.date().isoformat(), common_end.date().isoformat()
 
 
 def generate_sample_historical_data(
