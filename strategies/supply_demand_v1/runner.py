@@ -1421,14 +1421,23 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
     
-    # Write zones.csv
-    if result.all_zones:
-        zones_file = artifacts_dir / 'zones.csv'
-        with open(zones_file, 'w', newline='') as f:
+    # Write zones.csv (always create file, even if empty)
+    zones_file = artifacts_dir / 'zones.csv'
+    with open(zones_file, 'w', newline='') as f:
+        if result.all_zones:
             fieldnames = sorted(result.all_zones[0].keys())
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(result.all_zones)
+        else:
+            # Write header only with expected columns
+            expected_columns = [
+                'symbol', 'zone_type', 'proximal', 'distal',
+                'created_at', 'base_len', 'legout_len', 'legout_return',
+                'freshness_touches', 'is_fresh'
+            ]
+            writer = csv.DictWriter(f, fieldnames=expected_columns)
+            writer.writeheader()
     
     # Write run_manifest.json
     with open(artifacts_dir / 'run_manifest.json', 'w') as f:
