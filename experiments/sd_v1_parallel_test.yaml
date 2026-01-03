@@ -1,9 +1,9 @@
-# Supply & Demand V1 - Default Experiment Configuration
-# This configuration runs a basic backtest on a small set of symbols
+# Supply & Demand V1 - Parallel Execution Test Configuration
+# This configuration demonstrates parallel backtest execution
 
 # Experiment metadata
-name: "sd_v1_default"
-description: "Default S&D V1 backtest with 5 symbols"
+name: "sd_v1_parallel_test"
+description: "Test parallel execution with 3 symbols"
 
 # Data source
 data_source: "synthetic"  # or "historical"
@@ -13,12 +13,10 @@ symbols:
   - "BTC/USDT"
   - "ETH/USDT"
   - "SOL/USDT"
-  - "MATIC/USDT"
-  - "AVAX/USDT"
 
 # Time range for backtest
 start_date: "2024-01-01"
-end_date: "2024-03-31"
+end_date: "2024-01-31"
 
 # Multi-timeframe configuration
 timeframes:
@@ -26,6 +24,13 @@ timeframes:
   itf: "1h"   # Intermediate timeframe for trend
   ltf: "15m"  # Lower timeframe for zone detection and entry
   rtf: null   # Refining timeframe (optional)
+
+# Parallel execution settings (optional)
+parallel:
+  enabled: false  # Set to true to enable parallel execution
+  workers: 2      # Number of worker processes (default: CPU count - 1)
+  chunk_size: 1   # Symbols per chunk (default: 2)
+  fail_fast: true # Stop on first error (default: true)
 
 # Candle classification
 candle_classification:
@@ -83,6 +88,6 @@ initial_capital: 10000.0
 
 # Data generation (for synthetic backtests)
 data_generation:
-  num_candles: 1000    # Number of candles per symbol
-  volatility: 0.02     # Price volatility for synthetic data
-  seed: 42             # Random seed for reproducibility
+  num_candles: 200    # Smaller for fast testing
+  volatility: 0.02    # Price volatility for synthetic data
+  seed: 42            # Random seed for reproducibility

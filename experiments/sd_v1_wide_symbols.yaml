@@ -5,6 +5,9 @@
 name: "sd_v1_wide_symbols"
 description: "Comprehensive S&D V1 backtest with 15 symbols"
 
+# Data source
+data_source: "synthetic"  # or "historical"
+
 # Symbols to backtest
 symbols:
   - "BTC/USDT"

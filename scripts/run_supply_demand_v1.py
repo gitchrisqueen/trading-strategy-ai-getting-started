@@ -35,11 +35,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run default experiment
+  # Run default experiment (serial mode)
   python scripts/run_supply_demand_v1.py --config experiments/sd_v1_default.yaml
   
-  # Run wide symbols experiment
-  python scripts/run_supply_demand_v1.py --config experiments/sd_v1_wide_symbols.yaml
+  # Run with parallel execution
+  python scripts/run_supply_demand_v1.py --config experiments/sd_v1_wide_symbols.yaml --parallel
+  
+  # Run parallel with custom workers and chunk size
+  python scripts/run_supply_demand_v1.py --config experiments/sd_v1_wide_symbols.yaml --parallel --workers 4 --chunk-size 3
 
 Artifacts are written to:
   ./artifacts/sd_v1/<timestamp>_<short_hash>/
@@ -59,6 +62,26 @@ Output files:
         help='Path to experiment YAML configuration file'
     )
     
+    parser.add_argument(
+        '--parallel',
+        action='store_true',
+        help='Enable parallel execution (uses multiprocessing)'
+    )
+    
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=None,
+        help='Number of worker processes (default: CPU count - 1)'
+    )
+    
+    parser.add_argument(
+        '--chunk-size',
+        type=int,
+        default=None,
+        help='Number of symbols per chunk (default: 2)'
+    )
+    
     args = parser.parse_args()
     
     # Validate config file exists
@@ -67,10 +90,41 @@ Output files:
         print(f"Error: Config file not found: {config_path}")
         sys.exit(1)
     
+    # Load config and apply CLI overrides
+    from strategies.supply_demand_v1.runner import load_config
+    config = load_config(str(config_path))
+    
+    # Override parallel settings from CLI
+    if args.parallel or args.workers is not None or args.chunk_size is not None:
+        if 'parallel' not in config:
+            config['parallel'] = {}
+        
+        if args.parallel:
+            config['parallel']['enabled'] = True
+        
+        if args.workers is not None:
+            config['parallel']['workers'] = args.workers
+        
+        if args.chunk_size is not None:
+            config['parallel']['chunk_size'] = args.chunk_size
+    
     print("=" * 80)
     print("Supply & Demand V1 Experiment Runner")
     print("=" * 80)
     print(f"Config: {config_path}")
+    
+    # Display parallel settings if enabled
+    if config.get('parallel', {}).get('enabled', False):
+        import os
+        parallel = config['parallel']
+        workers = parallel.get('workers', max(1, os.cpu_count() - 1))
+        chunk_size = parallel.get('chunk_size', 2)
+        print(f"Mode: PARALLEL")
+        print(f"  Workers: {workers}")
+        print(f"  Chunk size: {chunk_size}")
+    else:
+        print(f"Mode: SERIAL")
+    
     print()
     
     try:
