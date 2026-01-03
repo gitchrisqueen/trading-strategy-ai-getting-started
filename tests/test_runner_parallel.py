@@ -188,6 +188,11 @@ def test_serial_vs_parallel_equivalence(minimal_parallel_config):
         serial_zones = getattr(serial, 'zones', [])
         parallel_zones = getattr(parallel, 'zones', [])
         assert len(serial_zones) == len(parallel_zones), f"Zone count mismatch for {serial.symbol}"
+        
+        # Check orders count
+        serial_orders = getattr(serial, 'orders', [])
+        parallel_orders = getattr(parallel, 'orders', [])
+        assert len(serial_orders) == len(parallel_orders), f"Order count mismatch for {serial.symbol}"
     
     print("✓ Serial and parallel results are equivalent")
 
@@ -438,6 +443,19 @@ def test_parallel_experiment_vs_serial_full_equivalence(tmp_path):
     
     # Compare zone counts
     assert len(result_serial.all_zones) == len(result_parallel.all_zones)
+    
+    # Compare order counts
+    assert len(result_serial.all_orders) == len(result_parallel.all_orders), \
+        f"Order count mismatch: serial={len(result_serial.all_orders)}, parallel={len(result_parallel.all_orders)}"
+    
+    # Compare orders row-by-row (after sorting)
+    if result_serial.all_orders and result_parallel.all_orders:
+        # Orders should already be sorted by (symbol, placed_idx)
+        for i, (order_s, order_p) in enumerate(zip(result_serial.all_orders, result_parallel.all_orders)):
+            assert order_s['symbol'] == order_p['symbol'], f"Order {i}: symbol mismatch"
+            assert order_s['placed_idx'] == order_p['placed_idx'], f"Order {i}: placed_idx mismatch"
+            assert order_s['status'] == order_p['status'], f"Order {i}: status mismatch"
+            assert order_s['zone_id'] == order_p['zone_id'], f"Order {i}: zone_id mismatch"
     
     print("✓ Full serial vs parallel experiments are equivalent")
 
