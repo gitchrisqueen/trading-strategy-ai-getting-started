@@ -471,14 +471,17 @@ def execute_backtest_for_symbol(
     # Track equity curve for drawdown calculation
     equity_curve = [initial_capital]  # Start with initial capital
     
+    # Import optimized zone tracker
+    from strategies.supply_demand_v1.zone_tracker import update_zone_freshness_optimized
+    zone_tracker = None
+    
     # Simulate backtest bar by bar
     for idx in range(len(candles)):
         candle = candles[idx]
         
-        # Update zone freshness
-        for zone in zones:
-            if zone.created_at < idx:
-                is_zone_fresh(zone, candles, idx)
+        # Update zone freshness using optimized spatial indexing
+        # This only checks zones that overlap with the current candle's price range
+        zone_tracker = update_zone_freshness_optimized(zones, candles, idx, zone_tracker)
         
         # Check for fills on pending orders
         for plan in list(pending_plans):
