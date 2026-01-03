@@ -304,6 +304,7 @@ class TestFreshnessTracking:
         current_idx = len(candles) - 1
         is_zone_fresh(zone, candles, current_idx)
         
+        # Note: is_fresh is DEPRECATED field (final state), use is_zone_fresh_at_idx() for time-relative checks
         assert zone.is_fresh is False, "Zone should not be fresh"
         # Touch count could be 2-4 depending on how many candles overlap
         assert zone.freshness_touches >= 2, f"Should have at least 2 touches, got {zone.freshness_touches}"
@@ -376,6 +377,7 @@ class TestZoneAttributes:
         assert isinstance(zone.base_len, int)
         assert isinstance(zone.legout_len, int)
         assert isinstance(zone.freshness_touches, int)
+        # Note: is_fresh is DEPRECATED field (kept for backward compatibility)
         assert isinstance(zone.is_fresh, bool)
     
     def test_zone_created_at_index(self):

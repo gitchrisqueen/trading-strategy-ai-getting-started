@@ -190,23 +190,56 @@ After a zone is created (at legout_end_idx), track subsequent candles:
 - Each time `high >= proximal`, increment `freshness_touches`
 - If `freshness_touches > 0`, zone is not fresh
 
-### Freshness Updates
+### Time-Relative Freshness (Important!)
 
-Freshness is updated dynamically as new candles arrive:
+**Freshness is time-relative** - a zone can be fresh at one point in time and not fresh later:
+
+```python
+from strategies.supply_demand_v1.zone_freshness_precompute import (
+    precompute_zone_freshness,
+    is_zone_fresh_at_idx
+)
+
+# Precompute freshness for all zones (done once at start)
+precompute_zone_freshness(zones, candles)
+
+# Check if zone is fresh at specific time points
+is_fresh_at_100 = is_zone_fresh_at_idx(zone, 100)  # True if not touched yet
+is_fresh_at_200 = is_zone_fresh_at_idx(zone, 200)  # False if touched by then
+```
+
+**Zone Fields**:
+- `zone.first_touch_idx`: Index when zone was first touched (None if never touched)
+- `zone.ever_touched`: Boolean - was zone EVER touched? (final state)
+- `zone.is_fresh`: **DEPRECATED** - Use `is_zone_fresh_at_idx()` for time-relative checks
+
+**Key principle**: Never use `zone.is_fresh` during simulation loops - it represents the FINAL state (whether zone was ever touched), not the state at a specific point in time.
+
+### Freshness Updates (Legacy - Incremental Tracking)
+
+For incremental tracking (less common), freshness is updated as new candles arrive:
 
 ```python
 def is_zone_fresh(zone, candles, current_idx):
-    """Update zone freshness by checking if price returned"""
+    """Update zone freshness by checking if price returned (LEGACY)
+    
+    NOTE: This is the OLD incremental approach.
+    Modern code should use precompute_zone_freshness() + is_zone_fresh_at_idx()
+    """
     for i in range(zone.created_at + 1, current_idx + 1):
         candle = candles[i]
         if zone.zone_type == ZoneType.DEMAND:
             if candle['low'] <= zone.proximal:
                 zone.freshness_touches += 1
-                zone.is_fresh = False
+                zone.first_touch_idx = i  # Track first touch
+                zone.ever_touched = True
+                zone.is_fresh = False  # DEPRECATED field
         else:  # SUPPLY
             if candle['high'] >= zone.proximal:
                 zone.freshness_touches += 1
-                zone.is_fresh = False
+                zone.first_touch_idx = i  # Track first touch
+                zone.ever_touched = True
+                zone.is_fresh = False  # DEPRECATED field
 ```
 
 ## Multi-Timeframe Framework

@@ -147,7 +147,11 @@ class ZoneFreshnessTracker:
                 # Check if candle overlaps the zone
                 if candle['low'] <= zone_top and candle['high'] >= zone_bottom:
                     zone.freshness_touches += 1
-                    zone.is_fresh = False
+                    # Set first_touch_idx if this is the first touch
+                    if zone.first_touch_idx is None:
+                        zone.first_touch_idx = i
+                    zone.ever_touched = True
+                    zone.is_fresh = False  # DEPRECATED: kept for backward compatibility
             
             # Update last checked index
             zone.last_checked_idx = current_idx

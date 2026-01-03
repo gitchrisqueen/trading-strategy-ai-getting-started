@@ -23,6 +23,7 @@ def print_zone_info(zone, idx):
     print(f"Leg-out length:   {zone.legout_len} candle(s)")
     print(f"Leg-out return:   {zone.legout_return*100:.2f}%")
     print(f"Freshness:        {'FRESH' if zone.is_fresh else 'NOT FRESH'} ({zone.freshness_touches} touches)")
+    print(f"                  (Note: This is FINAL state - use is_zone_fresh_at_idx() for time-relative checks)")
 
 
 def demo_dbr_zone():

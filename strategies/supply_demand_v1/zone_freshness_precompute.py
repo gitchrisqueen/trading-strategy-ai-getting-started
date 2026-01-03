@@ -24,13 +24,18 @@ def precompute_zone_freshness(
     and stores it in the zone object. This eliminates the need to check
     freshness during the backtest loop.
     
+    IMPORTANT: This sets FINAL state fields (ever_touched, is_fresh for backward compat)
+    NOT time-relative freshness. Use is_zone_fresh_at_idx(zone, idx) for time-relative checks.
+    
     Args:
         zones: List of all zones detected
         candles: List of all candle dictionaries
     
     Side effects:
-        Updates zone.first_touch_idx and zone.is_fresh for all zones
-        Sets zone.freshness_touches to correct count
+        Updates zone.first_touch_idx (index of first touch, or None if never touched)
+        Updates zone.ever_touched (final state: True if touched at any point)
+        Updates zone.freshness_touches (total touch count)
+        Updates zone.is_fresh (DEPRECATED: set to !ever_touched for backward compat)
     
     Complexity: O(Z + C) where Z = zones, C = candles
     """
@@ -58,7 +63,8 @@ def precompute_zone_freshness(
         if zone.created_at + 1 >= num_candles:
             # Zone created at or after last candle - never touched
             zone.first_touch_idx = None
-            zone.is_fresh = True
+            zone.ever_touched = False
+            zone.is_fresh = True  # DEPRECATED field, kept for backward compat
             zone.freshness_touches = 0
             zone.last_checked_idx = num_candles - 1
             continue
@@ -79,15 +85,17 @@ def precompute_zone_freshness(
             # Count total touches
             touch_count = np.sum(overlaps)
             
-            # Update zone
+            # Update zone with final state
             zone.first_touch_idx = first_touch_idx
-            zone.is_fresh = False
+            zone.ever_touched = True
+            zone.is_fresh = False  # DEPRECATED field, kept for backward compat
             zone.freshness_touches = int(touch_count)
             zone.last_checked_idx = num_candles - 1
         else:
             # Zone never touched
             zone.first_touch_idx = None
-            zone.is_fresh = True
+            zone.ever_touched = False
+            zone.is_fresh = True  # DEPRECATED field, kept for backward compat
             zone.freshness_touches = 0
             zone.last_checked_idx = num_candles - 1
 
