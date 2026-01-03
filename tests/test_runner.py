@@ -306,7 +306,7 @@ class TestSymbolBacktest:
         params = SupplyDemandParameters()
         candles = generate_synthetic_candles('BTC/USDT', 200, seed=42)
         
-        trades, zones, final_capital, equity_curve = execute_backtest_for_symbol(
+        trades, zones, final_capital, equity_curve, decision_funnel = execute_backtest_for_symbol(
             'BTC/USDT',
             candles,
             params,

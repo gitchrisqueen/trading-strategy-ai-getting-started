@@ -126,6 +126,7 @@ class Zone:
         freshness_touches: Number of times price returned to zone after creation
         legout_return: Percentage return of the leg-out move
         is_fresh: Whether zone has not been revisited
+        last_checked_idx: Last candle index where freshness was checked (for incremental updates)
     """
     zone_type: ZoneType
     proximal: float
@@ -140,6 +141,7 @@ class Zone:
     freshness_touches: int = 0
     legout_return: float = 0.0
     is_fresh: bool = True
+    last_checked_idx: int = -1  # Track last checked index for incremental updates
 
 
 @dataclass
@@ -570,7 +572,10 @@ def is_zone_fresh(
     candles: Any,
     current_idx: int
 ) -> bool:
-    """Check if a zone is fresh (not revisited since creation)
+    """Check if a zone is fresh (not revisited since creation) - OPTIMIZED
+    
+    This function uses incremental updates to avoid re-scanning all candles.
+    It only checks candles from last_checked_idx to current_idx.
     
     Args:
         zone: Zone to check
@@ -585,12 +590,18 @@ def is_zone_fresh(
         the zone interval [distal, proximal]
     
     Side effects:
-        Updates zone.freshness_touches counter and zone.is_fresh flag
-    """
-    # Check all candles after zone creation up to current
-    touches = 0
+        Updates zone.freshness_touches counter, zone.is_fresh flag, and zone.last_checked_idx
     
-    # Define zone bounds
+    Optimization:
+        - Incremental: Only check new candles since last_checked_idx
+        - O(1) per call instead of O(n) where n is candles since zone creation
+        - Caches result: If we've already checked this index, return immediately
+    """
+    # Early exit: If we've already checked this index, return cached result
+    if zone.last_checked_idx >= current_idx:
+        return zone.is_fresh
+    
+    # Define zone bounds (calculate once, reuse)
     if zone.zone_type == ZoneType.DEMAND:
         # For demand zones: proximal is top, distal is bottom
         zone_top = zone.proximal
@@ -600,18 +611,23 @@ def is_zone_fresh(
         zone_top = zone.distal
         zone_bottom = zone.proximal
     
-    # Check candles after zone creation
-    for i in range(zone.created_at + 1, min(current_idx + 1, len(candles))):
+    # Determine start index for incremental check
+    start_idx = max(zone.created_at + 1, zone.last_checked_idx + 1)
+    end_idx = min(current_idx + 1, len(candles))
+    
+    # Check only NEW candles since last check
+    for i in range(start_idx, end_idx):
         candle = candles[i]
         
         # Check if candle overlaps the zone
         # Overlap occurs if candle's low is below zone top AND candle's high is above zone bottom
         if candle['low'] <= zone_top and candle['high'] >= zone_bottom:
-            touches += 1
+            zone.freshness_touches += 1
+            zone.is_fresh = False
+            # Continue counting touches (don't early exit) for consistency with tests
     
-    # Update zone attributes
-    zone.freshness_touches = touches
-    zone.is_fresh = (touches == 0)
+    # Update last checked index
+    zone.last_checked_idx = current_idx
     
     return zone.is_fresh
 
