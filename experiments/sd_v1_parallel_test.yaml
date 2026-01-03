@@ -6,17 +6,28 @@ name: "sd_v1_parallel_test"
 description: "Test parallel execution with 3 symbols"
 
 # Data source
-data_source: "synthetic"  # or "historical"
+data_source: "historical"  # or "historical"
+
+# Historical data configuration (used when data_source: "historical")
+historical_data:
+  exchange: "binance"
+  market_type: "futures"
+  data_dir: "./data"
 
 # Symbols to backtest
 symbols:
-  - "BTC/USDT"
-  - "ETH/USDT"
-  - "SOL/USDT"
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "SOLUSDT"
+  - "BNBUSDT"
+  - "XRPUSDT"
+
+# Use full available history
+use_full_history: true
 
 # Time range for backtest
-start_date: "2024-01-01"
-end_date: "2024-01-31"
+#start_date: "2024-01-01"
+#end_date: "2024-01-31"
 
 # Multi-timeframe configuration
 timeframes:
@@ -27,7 +38,7 @@ timeframes:
 
 # Parallel execution settings (optional)
 parallel:
-  enabled: false  # Set to true to enable parallel execution
+  enabled: true  # Set to true to enable parallel execution
   workers: 2      # Number of worker processes (default: CPU count - 1)
   chunk_size: 1   # Symbols per chunk (default: 2)
   fail_fast: true # Stop on first error (default: true)
@@ -87,7 +98,7 @@ costs:
 initial_capital: 10000.0
 
 # Data generation (for synthetic backtests)
-data_generation:
-  num_candles: 200    # Smaller for fast testing
-  volatility: 0.02    # Price volatility for synthetic data
-  seed: 42            # Random seed for reproducibility
+#data_generation:
+#  num_candles: 200    # Smaller for fast testing
+#  volatility: 0.02    # Price volatility for synthetic data
+#  seed: 42            # Random seed for reproducibility
