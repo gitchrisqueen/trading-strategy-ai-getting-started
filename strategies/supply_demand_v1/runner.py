@@ -1878,7 +1878,13 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         'is_synthetic_data': is_synthetic_data,
         'exchange': exchange,
         'market_type': market_type,
-        'candle_timeframe': params.ltf_tf,  # Primary timeframe for zone detection
+        # Multi-timeframe configuration
+        'candles_timeframes_used': {
+            'ltf': params.ltf_tf,  # Lower timeframe for zone detection and entries
+            'itf': params.itf_tf,  # Intermediate timeframe for trend analysis
+            'htf': params.htf_tf,  # Higher timeframe for curve analysis
+        },
+        'candle_timeframe': params.ltf_tf,  # Legacy field for backward compatibility
         'symbol_data_provenance': symbol_data_provenance,
     }
     
@@ -2032,10 +2038,13 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     funnel_data = {
         'per_symbol': [asdict(f) for f in result.decision_funnels],
         'aggregate': {
-            'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
-            'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
-            'zones_after_curve_filter': sum(f.zones_after_curve_filter for f in result.decision_funnels),
-            'zones_after_trend_filter': sum(f.zones_after_trend_filter for f in result.decision_funnels),
+            # MTF-specific metrics
+            'zones_detected_ltf': sum(f.zones_detected_ltf for f in result.decision_funnels),
+            'zones_detected_htf': sum(f.zones_detected_htf for f in result.decision_funnels),
+            'zones_fresh_ltf': sum(f.zones_fresh_ltf for f in result.decision_funnels),
+            'zones_fresh_htf': sum(f.zones_fresh_htf for f in result.decision_funnels),
+            'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
+            'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
             'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
             'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
@@ -2043,6 +2052,11 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
             'trades_closed': sum(f.trades_closed for f in result.decision_funnels),
+            # Legacy fields for backward compatibility
+            'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
+            'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
+            'zones_after_curve_filter': sum(f.zones_after_curve_filter for f in result.decision_funnels),
+            'zones_after_trend_filter': sum(f.zones_after_trend_filter for f in result.decision_funnels),
         }
     }
     with open(artifacts_dir / 'decision_funnel.json', 'w') as f:
