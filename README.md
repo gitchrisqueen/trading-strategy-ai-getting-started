@@ -40,6 +40,7 @@ Comprehensive documentation for this repository:
 - **[Repository Map](docs/REPO_MAP.md)** - Complete map of repo structure with descriptions of key files and folders
 - **[Supply & Demand V1 Strategy](strategies/supply_demand_v1/README.md)** - Complete specification of the S&D zone-based trading strategy
 - **[Performance Guide](docs/PERFORMANCE_GUIDE.md)** - Optimization tips, benchmarks, and system requirements for fast backtesting ⚡
+- **[Parallel Execution Guide](docs/PARALLEL_EXECUTION_GUIDE.md)** - Speed up multi-symbol backtests with parallel processing (2x speedup with 4 workers)
 - **[Data Pipeline Guide](docs/DATA_PIPELINE.md)** - Automated data acquisition for Binance USDT-M futures with caching and validation
 - **[Copilot Workflow Guidelines](docs/COPILOT_WORKFLOW.md)** - Development workflow and PR best practices for future contributions
 - **[GitHub Copilot Instructions](.github/copilot-instructions.md)** - Repository-wide and path-specific instructions for Copilot-assisted development
@@ -49,6 +50,8 @@ Comprehensive documentation for this repository:
 **Contributing with GitHub Copilot?** See [Copilot Instructions](.github/copilot-instructions.md) for guidance on validation steps, coding standards, and efficient prompt patterns.
 
 **Running slow backtests?** Check the [Performance Guide](docs/PERFORMANCE_GUIDE.md) for optimization tips - recent improvements provide **25x speedup**!
+
+**Backtesting many symbols?** Use [Parallel Execution](docs/PARALLEL_EXECUTION_GUIDE.md) to run symbols in parallel - achieves **2x speedup** on multi-core systems!
 
 # Support and social media
 

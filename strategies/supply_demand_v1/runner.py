@@ -28,6 +28,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
 import yaml
 
@@ -749,6 +751,242 @@ def execute_backtest_for_symbol(
     return trades, zone_dicts, capital, equity_curve, funnel
 
 
+def run_symbol_backtest(
+    symbol: str,
+    config: Dict[str, Any],
+    params: SupplyDemandParameters,
+    initial_capital: float
+) -> SymbolResult:
+    """Pure function to run backtest for a single symbol.
+    
+    This function is designed for parallel execution:
+    - No side effects (no file I/O, no shared state modification)
+    - Loads its own data (no large shared DataFrames passed via pickle)
+    - Returns complete SymbolResult with all trades, zones, metrics
+    
+    Args:
+        symbol: Trading pair symbol
+        config: Full experiment configuration
+        params: Strategy parameters
+        initial_capital: Starting capital
+    
+    Returns:
+        SymbolResult containing all backtest data for this symbol
+    
+    Raises:
+        Exception: Any error during backtest execution
+    """
+    try:
+        # Load candles with metadata (each worker loads its own data)
+        candles, metadata = load_candles_from_config(symbol, config, return_metadata=True)
+        
+        # Execute backtest
+        trades, zones, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
+            symbol,
+            candles,
+            params,
+            initial_capital
+        )
+        
+        # Calculate max drawdown
+        max_drawdown = calculate_max_drawdown(equity_curve)
+        
+        # Build data provenance
+        data_provenance = {
+            'first_timestamp': candles[0]['timestamp'].isoformat() if candles else None,
+            'last_timestamp': candles[-1]['timestamp'].isoformat() if candles else None,
+            'first_close': candles[0]['close'] if candles else None,
+            'last_close': candles[-1]['close'] if candles else None,
+            'candle_count': len(candles),
+            'checksum': calculate_candle_checksum(candles),
+            'available_first_ts': metadata.get('available_first_ts'),
+            'available_last_ts': metadata.get('available_last_ts'),
+            'available_count': metadata.get('available_count'),
+            'used_first_ts': metadata.get('used_first_ts'),
+            'used_last_ts': metadata.get('used_last_ts'),
+            'used_count': metadata.get('used_count'),
+        }
+        
+        # Calculate metrics
+        filled_trades = [t for t in trades if t['realized_R'] is not None]
+        won_trades = [t for t in filled_trades if t['pnl'] > 0]
+        lost_trades = [t for t in filled_trades if t['pnl'] <= 0]
+        
+        symbol_result = SymbolResult(
+            symbol=symbol,
+            total_zones=len(zones),
+            fresh_zones=len([z for z in zones if z['is_fresh']]),
+            trades_placed=len(trades),
+            trades_filled=len(filled_trades),
+            trades_won=len(won_trades),
+            trades_lost=len(lost_trades),
+            total_pnl=sum(t['pnl'] for t in filled_trades),
+            win_rate=len(won_trades) / len(filled_trades) if filled_trades else 0.0,
+            avg_r_realized=sum(t['realized_R'] for t in filled_trades) / len(filled_trades) if filled_trades else 0.0,
+            max_drawdown=max_drawdown,
+            final_capital=final_capital,
+            equity_curve=equity_curve,
+            data_provenance=data_provenance,
+            decision_funnel=funnel,
+        )
+        
+        # Store trades and zones on the result for later aggregation
+        # We need to attach them as attributes for collection
+        symbol_result.trades = trades
+        symbol_result.zones = zones
+        
+        return symbol_result
+        
+    except Exception as e:
+        # Return a failure result with error information
+        # This allows the parent to continue with other symbols
+        error_result = SymbolResult(
+            symbol=symbol,
+            total_zones=0,
+            fresh_zones=0,
+            trades_placed=0,
+            trades_filled=0,
+            trades_won=0,
+            trades_lost=0,
+            total_pnl=0.0,
+            win_rate=0.0,
+            avg_r_realized=0.0,
+            max_drawdown=0.0,
+            final_capital=initial_capital,
+            equity_curve=[initial_capital],
+            data_provenance={
+                'error': str(e),
+                'error_type': type(e).__name__
+            },
+            decision_funnel=DecisionFunnel(symbol=symbol),
+        )
+        error_result.trades = []
+        error_result.zones = []
+        error_result.error = str(e)
+        return error_result
+
+
+def run_chunk(
+    chunk_symbols: List[str],
+    config: Dict[str, Any],
+    params: SupplyDemandParameters,
+    initial_capital: float
+) -> List[SymbolResult]:
+    """Run backtest for a chunk of symbols sequentially.
+    
+    This function is executed in a worker process. It processes
+    multiple symbols to reduce per-process startup overhead.
+    
+    Args:
+        chunk_symbols: List of symbols to process
+        config: Full experiment configuration
+        params: Strategy parameters
+        initial_capital: Starting capital
+    
+    Returns:
+        List of SymbolResults
+    """
+    results = []
+    for symbol in chunk_symbols:
+        result = run_symbol_backtest(symbol, config, params, initial_capital)
+        results.append(result)
+    return results
+
+
+def run_backtests_parallel(
+    symbols: List[str],
+    config: Dict[str, Any],
+    params: SupplyDemandParameters,
+    initial_capital: float,
+    parallel_config: Dict[str, Any]
+) -> List[SymbolResult]:
+    """Run backtests for multiple symbols in parallel using ProcessPoolExecutor.
+    
+    Args:
+        symbols: List of symbols to backtest
+        config: Full experiment configuration
+        params: Strategy parameters
+        initial_capital: Starting capital
+        parallel_config: Parallel execution configuration with keys:
+            - workers: Number of worker processes
+            - chunk_size: Number of symbols per chunk
+            - fail_fast: If True, stop on first failure
+    
+    Returns:
+        List of SymbolResults (sorted by symbol for determinism)
+    """
+    workers = parallel_config.get('workers', max(1, os.cpu_count() - 1))
+    chunk_size = parallel_config.get('chunk_size', 2)
+    fail_fast = parallel_config.get('fail_fast', True)
+    
+    # Split symbols into chunks
+    chunks = [symbols[i:i+chunk_size] for i in range(0, len(symbols), chunk_size)]
+    
+    print(f"Running parallel backtest:")
+    print(f"  - Workers: {workers}")
+    print(f"  - Total symbols: {len(symbols)}")
+    print(f"  - Chunks: {len(chunks)} (chunk_size={chunk_size})")
+    print(f"  - Fail fast: {fail_fast}")
+    print()
+    
+    all_results = []
+    errors = []
+    
+    # Use ProcessPoolExecutor for parallel execution
+    # Note: On some platforms, use 'spawn' method for better compatibility
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Submit all chunks
+        future_to_chunk = {
+            executor.submit(run_chunk, chunk, config, params, initial_capital): chunk
+            for chunk in chunks
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_chunk):
+            chunk = future_to_chunk[future]
+            try:
+                chunk_results = future.result()
+                all_results.extend(chunk_results)
+                
+                # Check for errors in results
+                for result in chunk_results:
+                    if hasattr(result, 'error'):
+                        error_msg = f"Symbol {result.symbol} failed: {result.error}"
+                        errors.append(error_msg)
+                        if fail_fast:
+                            print(f"ERROR: {error_msg}")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise RuntimeError(f"Backtest failed for {result.symbol}: {result.error}")
+                
+                # Progress update
+                completed_symbols = [r.symbol for r in chunk_results]
+                print(f"  ✓ Completed chunk: {', '.join(completed_symbols)}")
+                
+            except Exception as e:
+                error_msg = f"Chunk {chunk} failed: {e}"
+                errors.append(error_msg)
+                if fail_fast:
+                    print(f"ERROR: {error_msg}")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+                else:
+                    print(f"WARNING: {error_msg}")
+    
+    # Sort results by symbol for determinism
+    all_results.sort(key=lambda r: r.symbol)
+    
+    # Print error summary if any
+    if errors and not fail_fast:
+        print("\n" + "=" * 80)
+        print("ERRORS DURING PARALLEL EXECUTION")
+        print("=" * 80)
+        for error in errors:
+            print(f"  - {error}")
+        print("=" * 80)
+    
+    return all_results
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load experiment configuration from YAML file"""
     with open(config_path, 'r') as f:
@@ -790,20 +1028,30 @@ def create_artifacts_folder() -> Path:
     return artifacts_dir
 
 
-def run_backtest_experiment(config_path: str) -> ExperimentResult:
+def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = None) -> ExperimentResult:
     """Run a complete backtest experiment and generate artifacts
     
     Main entry point for running experiments. Loads config, executes backtests
     across all symbols, validates integrity, and writes artifacts.
     
     Args:
-        config_path: Path to YAML configuration file
+        config_path: Path to YAML configuration file (optional if config provided)
+        config: Configuration dictionary (optional if config_path provided)
     
     Returns:
         ExperimentResult with all data and artifacts
     """
     # Load configuration
-    config = load_config(config_path)
+    if config is None and config_path is None:
+        raise ValueError("Either config_path or config must be provided")
+    
+    if config is None:
+        config = load_config(config_path)
+    
+    # Store the config path for manifest (if provided)
+    if config_path is None:
+        config_path = config.get('_config_path', 'in-memory-config')
+    
     
     # Log if this is a futures config (optional validation)
     config_name = config.get('name', Path(config_path).stem)
@@ -852,89 +1100,84 @@ def run_backtest_experiment(config_path: str) -> ExperimentResult:
         rtf_tf=config['timeframes']['rtf'],
     )
     
-    # Run backtests for each symbol
-    symbol_results = []
+    # Check if parallel execution is enabled
+    parallel_config = config.get('parallel', {})
+    parallel_enabled = parallel_config.get('enabled', False)
+    
+    initial_capital = config['initial_capital']
+    
+    # Run backtests (parallel or serial based on config)
+    if parallel_enabled:
+        print("=" * 80)
+        print("PARALLEL EXECUTION MODE")
+        print("=" * 80)
+        
+        # Extract parallel settings
+        workers = parallel_config.get('workers', max(1, os.cpu_count() - 1))
+        chunk_size = parallel_config.get('chunk_size', 2)
+        fail_fast = parallel_config.get('fail_fast', True)
+        
+        parallel_settings = {
+            'workers': workers,
+            'chunk_size': chunk_size,
+            'fail_fast': fail_fast,
+        }
+        
+        # Run parallel
+        symbol_results = run_backtests_parallel(
+            config['symbols'],
+            config,
+            params,
+            initial_capital,
+            parallel_settings
+        )
+        
+    else:
+        print("Running backtests serially...")
+        symbol_results = []
+        
+        for symbol in config['symbols']:
+            print(f"Running backtest for {symbol}...")
+            result = run_symbol_backtest(symbol, config, params, initial_capital)
+            symbol_results.append(result)
+    
+    # Aggregate results (sort by symbol for determinism)
+    symbol_results.sort(key=lambda r: r.symbol)
+    
+    # Extract trades and zones from results
     all_trades = []
     all_zones = []
     decision_funnels = []
-    
-    initial_capital = config['initial_capital']
     
     # Collect window metadata for reporting
     used_window_global_start = None
     used_window_global_end = None
     
-    for symbol in config['symbols']:
-        print(f"Running backtest for {symbol}...")
+    for result in symbol_results:
+        # Extract trades and zones (attached by run_symbol_backtest)
+        if hasattr(result, 'trades'):
+            all_trades.extend(result.trades)
+        if hasattr(result, 'zones'):
+            all_zones.extend(result.zones)
         
-        # Load candles with metadata (synthetic or historical based on config)
-        candles, metadata = load_candles_from_config(symbol, config, return_metadata=True)
+        decision_funnels.append(result.decision_funnel)
         
         # Track global window (intersection across all symbols)
-        if metadata['used_first_ts']:
-            used_ts = datetime.fromisoformat(metadata['used_first_ts'])
+        if result.data_provenance.get('used_first_ts'):
+            used_ts = datetime.fromisoformat(result.data_provenance['used_first_ts'])
             if not used_window_global_start or used_ts > used_window_global_start:
                 used_window_global_start = used_ts
-        if metadata['used_last_ts']:
-            used_ts = datetime.fromisoformat(metadata['used_last_ts'])
+        if result.data_provenance.get('used_last_ts'):
+            used_ts = datetime.fromisoformat(result.data_provenance['used_last_ts'])
             if not used_window_global_end or used_ts < used_window_global_end:
                 used_window_global_end = used_ts
-        
-        # Execute backtest
-        trades, zones, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
-            symbol,
-            candles,
-            params,
-            initial_capital
-        )
-        
-        # Calculate max drawdown from equity curve
-        max_drawdown = calculate_max_drawdown(equity_curve)
-        
-        # Enhanced data provenance with metadata
-        data_provenance = {
-            'first_timestamp': candles[0]['timestamp'].isoformat() if candles else None,
-            'last_timestamp': candles[-1]['timestamp'].isoformat() if candles else None,
-            'first_close': candles[0]['close'] if candles else None,
-            'last_close': candles[-1]['close'] if candles else None,
-            'candle_count': len(candles),
-            'checksum': calculate_candle_checksum(candles),
-            # Add new metadata fields
-            'available_first_ts': metadata.get('available_first_ts'),
-            'available_last_ts': metadata.get('available_last_ts'),
-            'available_count': metadata.get('available_count'),
-            'used_first_ts': metadata.get('used_first_ts'),
-            'used_last_ts': metadata.get('used_last_ts'),
-            'used_count': metadata.get('used_count'),
-        }
-        
-        # Calculate symbol metrics
-        filled_trades = [t for t in trades if t['realized_R'] is not None]
-        won_trades = [t for t in filled_trades if t['pnl'] > 0]
-        lost_trades = [t for t in filled_trades if t['pnl'] <= 0]
-        
-        symbol_result = SymbolResult(
-            symbol=symbol,
-            total_zones=len(zones),
-            fresh_zones=len([z for z in zones if z['is_fresh']]),
-            trades_placed=len(trades),
-            trades_filled=len(filled_trades),
-            trades_won=len(won_trades),
-            trades_lost=len(lost_trades),
-            total_pnl=sum(t['pnl'] for t in filled_trades),
-            win_rate=len(won_trades) / len(filled_trades) if filled_trades else 0.0,
-            avg_r_realized=sum(t['realized_R'] for t in filled_trades) / len(filled_trades) if filled_trades else 0.0,
-            max_drawdown=max_drawdown,
-            final_capital=final_capital,
-            equity_curve=equity_curve,
-            data_provenance=data_provenance,
-            decision_funnel=funnel,
-        )
-        
-        symbol_results.append(symbol_result)
-        all_trades.extend(trades)
-        all_zones.extend(zones)
-        decision_funnels.append(funnel)
+    
+    # Sort trades and zones for determinism
+    # Sort trades by (symbol, entry_idx)
+    all_trades.sort(key=lambda t: (t['symbol'], t.get('entry_idx', 0)))
+    
+    # Sort zones by (symbol, created_at)
+    all_zones.sort(key=lambda z: (z['symbol'], z.get('created_at', 0)))
     
     # Guard-rail: Validate that multi-symbol runs have different data per symbol
     if len(config['symbols']) >= 2:

@@ -5,6 +5,17 @@
 name: "sd_v1_wide_symbols"
 description: "Comprehensive S&D V1 backtest with 15 symbols"
 
+# Data source
+data_source: "synthetic"  # or "historical"
+
+# Parallel execution settings (optional)
+# Set enabled: true to run symbols in parallel
+parallel:
+  enabled: false  # Set to true to enable parallel execution
+  workers: 4      # Number of worker processes (default: CPU count - 1)
+  chunk_size: 3   # Symbols per chunk (default: 2)
+  fail_fast: true # Stop on first error (default: true)
+
 # Symbols to backtest
 symbols:
   - "BTC/USDT"
