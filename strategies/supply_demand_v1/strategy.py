@@ -106,6 +106,11 @@ class SupplyDemandParameters:
     
     # Limit Order Configuration
     ttl_bars: Optional[int] = 10  # Time-to-live in bars for limit orders (None = no expiry)
+    
+    # Order Deduplication & Retry Policy
+    max_retries_per_zone: int = 1  # Maximum order placement attempts per zone (default 1 = no retries)
+    rearm_requires_price_reset: bool = True  # Require price to move away from zone before retry
+    rearm_price_buffer_pct: float = 0.005  # Price must move beyond proximal + 0.5% to rearm
 
 
 @dataclass
