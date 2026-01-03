@@ -394,6 +394,11 @@ class DecisionFunnel:
     orders_expired_ttl: int = 0
     trades_closed: int = 0
     
+    # Polarity flip metrics
+    total_flips: int = 0
+    flips_supply_to_demand: int = 0
+    flips_demand_to_supply: int = 0
+    
     # Legacy fields for backward compatibility (deprecated)
     zones_detected: int = 0
     zones_fresh: int = 0
@@ -1069,11 +1074,20 @@ def execute_backtest_for_symbol(
     active_zones_sum = 0  # For calculating average
     active_zones_samples = 0
     
+    # Track polarity flip metrics
+    total_flips = 0
+    flips_supply_to_demand = 0
+    flips_demand_to_supply = 0
+    
+    # Track previous close for polarity flip detection
+    prev_close = None
+    
     # Simulate backtest bar by bar on LTF
     for ltf_idx in range(len(ltf_candles)):
         ltf_candle = ltf_candles[ltf_idx]
         ltf_timestamp = ltf_candle['timestamp']
         current_price = ltf_candle['close']
+        current_close = current_price
         
         # OPTIMIZATION: Use precomputed O(1) mapping instead of O(log N) bisect
         htf_idx = ltf_to_htf_idx[ltf_idx]
@@ -1172,9 +1186,11 @@ def execute_backtest_for_symbol(
                     open_positions.append(plan)
                     
                     # Create trade record (entry) with curve and trend state
+                    # Use polarity at entry time for trade side determination
+                    entry_polarity = get_zone_polarity_at_idx(plan.zone, ltf_idx)
                     trades.append({
                         'symbol': symbol,
-                        'side': 'LONG' if plan.zone.zone_type == ZoneType.DEMAND else 'SHORT',
+                        'side': 'LONG' if entry_polarity == ZoneType.DEMAND else 'SHORT',
                         'entry': plan.actual_entry_price or plan.entry_price,
                         'stop': plan.stop_loss,
                         'target': plan.take_profit,
@@ -1192,11 +1208,18 @@ def execute_backtest_for_symbol(
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
                         'position_size': plan.position_size,
+                        # Polarity tracking
+                        'polarity_type_at_entry': enum_to_string(entry_polarity),
+                        'flip_count_at_entry': plan.zone.flip_count,
                     })
         
         # Check for exits on open positions
         for plan in list(open_positions):
-            is_long = plan.zone.zone_type == ZoneType.DEMAND
+            # Use polarity at entry (stored in plan) for position direction
+            # Get polarity from the corresponding trade record
+            plan_entry_idx = plan.filled_at_idx
+            entry_polarity = get_zone_polarity_at_idx(plan.zone, plan_entry_idx) if plan_entry_idx is not None else plan.zone.zone_type
+            is_long = entry_polarity == ZoneType.DEMAND
             
             # Check for intrabar stop or target hit
             exit_reason = check_intrabar_exit(
@@ -1284,6 +1307,27 @@ def execute_backtest_for_symbol(
         if len(active_zones) > max_active_zones:
             max_active_zones = len(active_zones)
         
+        # Update polarity for active zones (event-driven, O(active_zones) per candle)
+        # Only update zones that could have flipped based on price crossing their distal boundary
+        if prev_close is not None and ltf_idx > 0:
+            for zone_id, zone in active_zones.items():
+                # Check if polarity should flip
+                from strategies.supply_demand_v1.strategy import check_polarity_flip, get_zone_polarity_at_idx
+                
+                polarity_before = get_zone_polarity_at_idx(zone, ltf_idx - 1)
+                flipped = check_polarity_flip(zone, ltf_idx, current_close, prev_close)
+                
+                if flipped:
+                    polarity_after = zone.polarity_type
+                    total_flips += 1
+                    if polarity_before == ZoneType.SUPPLY and polarity_after == ZoneType.DEMAND:
+                        flips_supply_to_demand += 1
+                    elif polarity_before == ZoneType.DEMAND and polarity_after == ZoneType.SUPPLY:
+                        flips_demand_to_supply += 1
+        
+        # Store prev_close for next iteration
+        prev_close = current_close
+        
         # Look for new setups - only check ACTIVE zones (Phase 4 + Phase 5)
         if ltf_idx > 100:  # Need some history for analysis
             for zone_id, zone in active_zones.items():
@@ -1325,18 +1369,24 @@ def execute_backtest_for_symbol(
                 
                 # Passed gating - now score the zone
                 # Find opposing zone (nearest fresh zone of opposite type)
+                # Use dynamic polarity for zone type determination
+                from strategies.supply_demand_v1.strategy import get_zone_polarity_at_idx
+                zone_polarity_now = get_zone_polarity_at_idx(zone, ltf_idx)
+                
                 opposing_zone = None
-                if zone.zone_type == ZoneType.DEMAND:
+                if zone_polarity_now == ZoneType.DEMAND:
                     # Find nearest fresh supply above
                     for z in ltf_zones:
-                        if z.zone_type == ZoneType.SUPPLY and z.proximal > current_price:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.SUPPLY and z.proximal > current_price:
                             if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
                                 if opposing_zone is None or z.proximal < opposing_zone.proximal:
                                     opposing_zone = z
                 else:  # SUPPLY
                     # Find nearest fresh demand below
                     for z in ltf_zones:
-                        if z.zone_type == ZoneType.DEMAND and z.proximal < current_price:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.DEMAND and z.proximal < current_price:
                             if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
                                 if opposing_zone is None or z.proximal > opposing_zone.proximal:
                                     opposing_zone = z
@@ -1375,8 +1425,10 @@ def execute_backtest_for_symbol(
                 funnel.orders_placed += 1
                 
                 # Create order record with curve and trend state
+                # Use dynamic polarity at order placement time
+                order_polarity = get_zone_polarity_at_idx(zone, ltf_idx)
                 zone_id = f"{symbol}_{zone.created_at}_{zone.zone_type.value}"
-                side = 'LONG' if zone.zone_type == ZoneType.DEMAND else 'SHORT'
+                side = 'LONG' if order_polarity == ZoneType.DEMAND else 'SHORT'
                 expiry_idx = ltf_idx + params.ttl_bars if params.ttl_bars else None
                 
                 orders.append({
@@ -1398,12 +1450,18 @@ def execute_backtest_for_symbol(
                     'cancel_reason': None,
                     'curve_state': enum_to_string(curve_state),
                     'trend_state': enum_to_string(trend_state),
+                    # Polarity tracking
+                    'polarity_type_at_order': enum_to_string(order_polarity),
+                    'flip_count_at_order': zone.flip_count,
                 })
     
     # Close any remaining open positions at EOD (end of data)
     if ltf_candles:
         for plan in open_positions:
-            is_long = plan.zone.zone_type == ZoneType.DEMAND
+            # Use polarity at entry for EOD close
+            plan_entry_idx = plan.filled_at_idx
+            entry_polarity = get_zone_polarity_at_idx(plan.zone, plan_entry_idx) if plan_entry_idx is not None else plan.zone.zone_type
+            is_long = entry_polarity == ZoneType.DEMAND
             exit_price = ltf_candles[-1]['close']
             
             pnl = calculate_pnl_with_costs(plan, exit_price, params)
@@ -1472,9 +1530,13 @@ def execute_backtest_for_symbol(
         # Calculate final_is_fresh: is zone fresh at the END of the simulation?
         final_is_fresh = is_zone_fresh_at_idx(zone, end_idx)
         
+        # Get final polarity at end of simulation
+        from strategies.supply_demand_v1.strategy import get_zone_polarity_at_idx
+        final_polarity = get_zone_polarity_at_idx(zone, end_idx)
+        
         zone_dicts.append({
             'symbol': symbol,
-            'zone_type': zone.zone_type.value,
+            'zone_type': zone.zone_type.value,  # Original detection type
             'proximal': zone.proximal,
             'distal': zone.distal,
             'created_at': zone.created_at,
@@ -1487,6 +1549,11 @@ def execute_backtest_for_symbol(
             'final_is_fresh': final_is_fresh,  # Is it fresh at END of simulation?
             # DEPRECATED: kept for backward compatibility
             'is_fresh': zone.is_fresh,  # Same as ever_touched (inverted)
+            # Polarity fields
+            'original_type': zone.original_type.value if zone.original_type else zone.zone_type.value,
+            'final_polarity_type': final_polarity.value,
+            'flip_count': zone.flip_count,
+            'last_flip_idx': zone.last_flip_idx,
         })
     
     if enable_profiling:
@@ -1518,6 +1585,11 @@ def execute_backtest_for_symbol(
             print(f"{'Candidates/Candle Ratio':25s}: {scoring_rate:.4f}")
         
         print("=" * 80 + "\n")
+    
+    # Update funnel with polarity flip metrics
+    funnel.total_flips = total_flips
+    funnel.flips_supply_to_demand = flips_supply_to_demand
+    funnel.flips_demand_to_supply = flips_demand_to_supply
     
     return trades, zone_dicts, orders, capital, equity_curve, funnel
 
@@ -2295,6 +2367,10 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
             'trades_closed': sum(f.trades_closed for f in result.decision_funnels),
+            # Polarity flip metrics
+            'total_flips': sum(f.total_flips for f in result.decision_funnels),
+            'flips_supply_to_demand': sum(f.flips_supply_to_demand for f in result.decision_funnels),
+            'flips_demand_to_supply': sum(f.flips_demand_to_supply for f in result.decision_funnels),
             # Legacy fields for backward compatibility
             'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
             'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),

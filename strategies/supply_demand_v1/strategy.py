@@ -113,7 +113,7 @@ class Zone:
     """Represents a supply or demand zone
     
     Attributes:
-        zone_type: SUPPLY or DEMAND
+        zone_type: SUPPLY or DEMAND (original detection type - IMMUTABLE)
         proximal: Price level closest to current price (entry reference)
         distal: Price level farthest from current price (stop reference)
         created_at: Index where zone was created (legout_end_idx)
@@ -128,6 +128,13 @@ class Zone:
         first_touch_idx: Index when zone was first touched (None if never touched)
         ever_touched: Whether zone was EVER touched (final state, NOT time-relative)
         last_checked_idx: Last candle index where freshness was checked (for incremental updates)
+        
+        POLARITY FIELDS (for dynamic supply/demand flipping):
+        original_type: SUPPLY or DEMAND (same as zone_type, kept for clarity)
+        polarity_type: SUPPLY or DEMAND (mutable, changes based on price breaks)
+        flip_count: Number of times polarity has flipped
+        last_flip_idx: Index of most recent polarity flip (None if never flipped)
+        last_polarity_check_idx: Last index where polarity was checked
         
         DEPRECATED FIELDS (for backward compatibility):
         is_fresh: DEPRECATED - Use is_zone_fresh_at_idx() instead for time-relative freshness
@@ -150,6 +157,116 @@ class Zone:
     last_checked_idx: int = -1  # Track last checked index for incremental updates
     # DEPRECATED: Use is_zone_fresh_at_idx() for time-relative freshness
     is_fresh: bool = True  # Kept for backward compatibility only
+    # Polarity fields (dynamic zone type)
+    original_type: Optional[ZoneType] = None  # Set during initialization
+    polarity_type: Optional[ZoneType] = None  # Current polarity (changes over time)
+    flip_count: int = 0  # Number of times polarity flipped
+    last_flip_idx: Optional[int] = None  # Index of most recent flip
+    last_polarity_check_idx: int = -1  # Last index where polarity was updated
+
+
+def initialize_zone_polarity(zone: Zone) -> None:
+    """Initialize polarity fields for a newly created zone
+    
+    Sets original_type and polarity_type to the detected zone_type.
+    Called once when zone is first created.
+    
+    Args:
+        zone: Zone object to initialize
+    
+    Side effects:
+        Sets zone.original_type and zone.polarity_type
+    """
+    if zone.original_type is None:
+        zone.original_type = zone.zone_type
+    if zone.polarity_type is None:
+        zone.polarity_type = zone.zone_type
+
+
+def check_polarity_flip(
+    zone: Zone,
+    current_idx: int,
+    current_close: float,
+    prev_close: float
+) -> bool:
+    """Check if zone polarity should flip based on price crossing distal boundary
+    
+    Uses conservative "decisive break" rule with hysteresis:
+    - Supply→Demand flip: previous close <= distal AND current close > distal
+    - Demand→Supply flip: previous close >= distal AND current close < distal
+    
+    Args:
+        zone: Zone to check
+        current_idx: Current candle index
+        current_close: Current candle close price
+        prev_close: Previous candle close price
+    
+    Returns:
+        True if polarity flipped, False otherwise
+    
+    Side effects:
+        Updates zone.polarity_type, zone.flip_count, zone.last_flip_idx if flip occurs
+    """
+    # Skip if already checked at this index
+    if zone.last_polarity_check_idx >= current_idx:
+        return False
+    
+    zone.last_polarity_check_idx = current_idx
+    
+    # Get current polarity (use zone_type if polarity_type not initialized)
+    current_polarity = zone.polarity_type if zone.polarity_type is not None else zone.zone_type
+    
+    # Use distal as flip boundary (most conservative)
+    flip_boundary = zone.distal
+    
+    flipped = False
+    
+    if current_polarity == ZoneType.SUPPLY:
+        # Supply flips to Demand when price decisively breaks ABOVE distal
+        if prev_close <= flip_boundary and current_close > flip_boundary:
+            zone.polarity_type = ZoneType.DEMAND
+            zone.flip_count += 1
+            zone.last_flip_idx = current_idx
+            flipped = True
+    elif current_polarity == ZoneType.DEMAND:
+        # Demand flips to Supply when price decisively breaks BELOW distal
+        if prev_close >= flip_boundary and current_close < flip_boundary:
+            zone.polarity_type = ZoneType.SUPPLY
+            zone.flip_count += 1
+            zone.last_flip_idx = current_idx
+            flipped = True
+    
+    return flipped
+
+
+def get_zone_polarity_at_idx(zone: Zone, idx: int) -> ZoneType:
+    """Get the polarity of a zone at a specific index
+    
+    Returns the polarity type that should be used for trading decisions at the given index.
+    If polarity hasn't been initialized or updated yet, returns the original zone_type.
+    
+    Args:
+        zone: Zone object
+        idx: Candle index
+    
+    Returns:
+        Current polarity type (SUPPLY or DEMAND)
+    """
+    # If polarity never initialized, use original type
+    if zone.polarity_type is None:
+        return zone.zone_type
+    
+    # If there have been flips and the requested idx is at or after the last flip,
+    # use the current polarity_type
+    if zone.last_flip_idx is not None and idx >= zone.last_flip_idx:
+        return zone.polarity_type
+    
+    # If we've checked polarity up to this index (but no flip yet), use polarity_type
+    if zone.last_polarity_check_idx >= idx:
+        return zone.polarity_type
+    
+    # Otherwise, use original type (polarity not updated yet to this point)
+    return zone.zone_type
 
 
 @dataclass
@@ -500,6 +617,9 @@ def detect_zones_dbr_rbd(
             legout_return=legout_return,
             is_fresh=True
         )
+        
+        # Initialize polarity fields
+        initialize_zone_polarity(zone)
         
         zones.append(zone)
         
