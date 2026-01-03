@@ -21,6 +21,16 @@ This directory contains comprehensive documentation for the Trading Strategy AI 
   - Import patterns for notebooks and tests
   - Developer notes on module resolution
 
+### Performance and Optimization
+
+- **[PERFORMANCE_GUIDE.md](./PERFORMANCE_GUIDE.md)** - Backtesting performance optimization guide ⚡
+  - Performance benchmarks and scaling guidelines
+  - System requirements and recommendations
+  - Code-level optimizations (25x speedup achieved)
+  - Troubleshooting slow performance
+  - Profiling tools and techniques
+  - Memory and CPU optimization tips
+
 ### Development Workflow
 
 - **[COPILOT_WORKFLOW.md](./COPILOT_WORKFLOW.md)** - Development guidelines and PR best practices

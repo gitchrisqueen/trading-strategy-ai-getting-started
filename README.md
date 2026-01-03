@@ -39,6 +39,7 @@ Comprehensive documentation for this repository:
 - **[Project Context](docs/PROJECT_CONTEXT.md)** - Project overview, setup instructions, and where to find key implementations
 - **[Repository Map](docs/REPO_MAP.md)** - Complete map of repo structure with descriptions of key files and folders
 - **[Supply & Demand V1 Strategy](strategies/supply_demand_v1/README.md)** - Complete specification of the S&D zone-based trading strategy
+- **[Performance Guide](docs/PERFORMANCE_GUIDE.md)** - Optimization tips, benchmarks, and system requirements for fast backtesting ⚡
 - **[Data Pipeline Guide](docs/DATA_PIPELINE.md)** - Automated data acquisition for Binance USDT-M futures with caching and validation
 - **[Copilot Workflow Guidelines](docs/COPILOT_WORKFLOW.md)** - Development workflow and PR best practices for future contributions
 - **[GitHub Copilot Instructions](.github/copilot-instructions.md)** - Repository-wide and path-specific instructions for Copilot-assisted development
@@ -46,6 +47,8 @@ Comprehensive documentation for this repository:
 **New to this repo?** Start with [Project Context](docs/PROJECT_CONTEXT.md) and [Repository Map](docs/REPO_MAP.md) to get oriented.
 
 **Contributing with GitHub Copilot?** See [Copilot Instructions](.github/copilot-instructions.md) for guidance on validation steps, coding standards, and efficient prompt patterns.
+
+**Running slow backtests?** Check the [Performance Guide](docs/PERFORMANCE_GUIDE.md) for optimization tips - recent improvements provide **25x speedup**!
 
 # Support and social media
 
