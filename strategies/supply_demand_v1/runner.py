@@ -454,13 +454,44 @@ def execute_backtest_for_symbol(
     Returns:
         Tuple of (trades, zones, final_capital, equity_curve, decision_funnel)
     """
+    # Optional profiling support
+    import os
+    enable_profiling = os.environ.get('SDV1_PROFILE') == '1'
+    
+    if enable_profiling:
+        import time
+        stage_timings = {}
+        stage_start = time.time()
+    
     # Detect all zones
     zones = detect_zones_dbr_rbd(candles, params)
+    
+    if enable_profiling:
+        stage_timings['zone_detection'] = time.time() - stage_start
+        stage_start = time.time()
+    
+    # OPTIMIZATION: Precompute zone freshness using vectorized operations
+    # This eliminates the need to check each zone on every candle (O(Z*C) -> O(Z+C))
+    from strategies.supply_demand_v1.zone_freshness_precompute import (
+        precompute_zone_freshness,
+        is_zone_fresh_at_idx,
+        build_zone_creation_index,
+        cache_zone_metrics
+    )
+    
+    precompute_zone_freshness(zones, candles)
+    zone_creation_index = build_zone_creation_index(zones)
+    cache_zone_metrics(zones)
+    
+    if enable_profiling:
+        stage_timings['freshness_precompute'] = time.time() - stage_start
+        stage_start = time.time()
     
     # Initialize decision funnel tracking
     funnel = DecisionFunnel(symbol=symbol)
     funnel.zones_detected = len(zones)
-    funnel.zones_fresh = len([z for z in zones if z.is_fresh])
+    # Count zones that are fresh at the start (index 0)
+    funnel.zones_fresh = len([z for z in zones if z.first_touch_idx is None or z.first_touch_idx > 0])
     
     # Track capital and positions
     capital = initial_capital
@@ -471,17 +502,11 @@ def execute_backtest_for_symbol(
     # Track equity curve for drawdown calculation
     equity_curve = [initial_capital]  # Start with initial capital
     
-    # Import optimized zone tracker
-    from strategies.supply_demand_v1.zone_tracker import update_zone_freshness_optimized
-    zone_tracker = None
-    
     # Simulate backtest bar by bar
     for idx in range(len(candles)):
         candle = candles[idx]
         
-        # Update zone freshness using optimized spatial indexing
-        # This only checks zones that overlap with the current candle's price range
-        zone_tracker = update_zone_freshness_optimized(zones, candles, idx, zone_tracker)
+        # Zone freshness is already precomputed - no per-candle checks needed!
         
         # Check for fills on pending orders
         for plan in list(pending_plans):
@@ -600,53 +625,62 @@ def execute_backtest_for_symbol(
                 if management.get("update_stop") is not None:
                     plan.stop_loss = management["update_stop"]
         
-        # Look for new setups (simplified - only check fresh zones)
+        # Look for new setups - only check zones that are fresh at this index
         if idx > 100:  # Need some history for HTF/ITF analysis
+            # OPTIMIZATION: Only evaluate zones that are:
+            # 1. Created before this index
+            # 2. Fresh at this index (using precomputed first_touch_idx)
             for zone in zones:
-                if zone.is_fresh and zone.created_at < idx:
-                    # Check if we already have a pending order or position for this zone
-                    zone_already_traded = any(
-                        p.zone == zone for p in pending_plans + open_positions
-                    )
-                    if zone_already_traded:
-                        continue
-                    
-                    # Candidate evaluation
-                    funnel.candidates_evaluated += 1
-                    
-                    # Score the zone (simplified - use placeholder curve/trend)
-                    # Note: In full implementation, curve and trend rejection would be tracked here
-                    score = odds_enhancer_score(
-                        zone,
-                        candle['close'],
-                        CurveLocation.EQUILIBRIUM,  # Simplified
-                        TrendDirection.SIDEWAYS,     # Simplified
-                        params,
-                        None  # opposing_zone
-                    )
-                    
-                    if score < params.min_setup_score:
-                        funnel.rejected_min_score += 1
-                        continue
-                    
-                    # Build trade plan
-                    plan = build_trade_plan(
-                        zone,
-                        candle['close'],
-                        capital,
-                        params,
-                        None,  # opposing_zone simplified
-                        score
-                    )
-                    
-                    if not plan or plan.r_multiple < params.min_reward_risk:
-                        funnel.rejected_min_rr += 1
-                        continue
-                    
-                    # Place order
-                    plan.placed_at_idx = idx
-                    pending_plans.append(plan)
-                    funnel.orders_placed += 1
+                if zone.created_at >= idx:
+                    continue  # Zone not created yet
+                
+                # Check freshness using precomputed index (O(1) instead of O(C))
+                if not is_zone_fresh_at_idx(zone, idx):
+                    continue  # Zone already touched
+                
+                # Check if we already have a pending order or position for this zone
+                zone_already_traded = any(
+                    p.zone == zone for p in pending_plans + open_positions
+                )
+                if zone_already_traded:
+                    continue
+                
+                # Candidate evaluation
+                funnel.candidates_evaluated += 1
+                
+                # Score the zone (simplified - use placeholder curve/trend)
+                # Note: In full implementation, curve and trend rejection would be tracked here
+                score = odds_enhancer_score(
+                    zone,
+                    candle['close'],
+                    CurveLocation.EQUILIBRIUM,  # Simplified
+                    TrendDirection.SIDEWAYS,     # Simplified
+                    params,
+                    None  # opposing_zone
+                )
+                
+                if score < params.min_setup_score:
+                    funnel.rejected_min_score += 1
+                    continue
+                
+                # Build trade plan
+                plan = build_trade_plan(
+                    zone,
+                    candle['close'],
+                    capital,
+                    params,
+                    None,  # opposing_zone simplified
+                    score
+                )
+                
+                if not plan or plan.r_multiple < params.min_reward_risk:
+                    funnel.rejected_min_rr += 1
+                    continue
+                
+                # Place order
+                plan.placed_at_idx = idx
+                pending_plans.append(plan)
+                funnel.orders_placed += 1
     
     # Close any remaining open positions at EOD (end of data)
     for plan in open_positions:
@@ -678,6 +712,10 @@ def execute_backtest_for_symbol(
         capital += pnl
         equity_curve.append(capital)
     
+    if enable_profiling:
+        stage_timings['backtest_loop'] = time.time() - stage_start
+        stage_start = time.time()
+    
     # Convert zones to dicts for output
     zone_dicts = []
     for zone in zones:
@@ -693,6 +731,20 @@ def execute_backtest_for_symbol(
             'freshness_touches': zone.freshness_touches,
             'is_fresh': zone.is_fresh,
         })
+    
+    if enable_profiling:
+        stage_timings['output_conversion'] = time.time() - stage_start
+        
+        # Print profiling results
+        print("\n" + "=" * 80)
+        print(f"PROFILING RESULTS - {symbol}")
+        print("=" * 80)
+        total_time = sum(stage_timings.values())
+        for stage, timing in stage_timings.items():
+            pct = (timing / total_time * 100) if total_time > 0 else 0
+            print(f"{stage:25s}: {timing:7.3f}s ({pct:5.1f}%)")
+        print(f"{'TOTAL':25s}: {total_time:7.3f}s")
+        print("=" * 80 + "\n")
     
     return trades, zone_dicts, capital, equity_curve, funnel
 
