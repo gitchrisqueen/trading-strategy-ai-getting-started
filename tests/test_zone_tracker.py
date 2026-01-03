@@ -143,11 +143,11 @@ class TestZoneFreshnessTracker:
         
         # Update at candle 1 (away from zone)
         tracker.update_zone_freshness(candles, 1)
-        assert zones[0].is_fresh == True
+        assert zones[0].is_fresh == True  # DEPRECATED field check (still fresh)
         
         # Update at candle 2 (touches zone)
         tracker.update_zone_freshness(candles, 2)
-        assert zones[0].is_fresh == False
+        assert zones[0].is_fresh == False  # DEPRECATED field check (now touched)
         assert zones[0].freshness_touches == 1
     
     def test_optimized_function_integration(self):
@@ -204,7 +204,7 @@ class TestZoneFreshnessTracker:
         for idx in range(len(candles)):
             tracker.update_zone_freshness(candles, idx)
         
-        # Zone should be stale after candle 2
+        # Zone should be stale after candle 2 (DEPRECATED field check)
         assert zones[0].is_fresh == False
         assert zones[0].freshness_touches >= 1
     
@@ -291,6 +291,7 @@ class TestOptimizationCorrectness:
         # Compare results
         assert len(zones_naive) == len(zones_optimized)
         
+        # Verify is_fresh (DEPRECATED field) matches between naive and optimized
         for i in range(len(zones_naive)):
             assert zones_naive[i].is_fresh == zones_optimized[i].is_fresh, \
                 f"Zone {i}: naive={zones_naive[i].is_fresh}, optimized={zones_optimized[i].is_fresh}"
