@@ -525,3 +525,105 @@ class TestMultiSymbolIsolation:
         
         # They should not be identical
         assert closes1 != closes2, "Candles with different seeds should differ"
+
+
+class TestDecisionFunnel:
+    """Test decision funnel telemetry"""
+    
+    def test_decision_funnel_artifact_created(self, temp_config_file, temp_artifacts_dir):
+        """Test that decision_funnel.json is created"""
+        result = run_backtest_experiment(temp_config_file)
+        write_artifacts(result, temp_artifacts_dir)
+        
+        # Check decision_funnel.json exists
+        funnel_file = temp_artifacts_dir / 'decision_funnel.json'
+        assert funnel_file.exists(), "decision_funnel.json should be created"
+    
+    def test_decision_funnel_structure(self, temp_config_file, temp_artifacts_dir):
+        """Test that decision_funnel.json has expected structure"""
+        result = run_backtest_experiment(temp_config_file)
+        write_artifacts(result, temp_artifacts_dir)
+        
+        with open(temp_artifacts_dir / 'decision_funnel.json', 'r') as f:
+            funnel_data = json.load(f)
+        
+        # Check top-level structure
+        assert 'per_symbol' in funnel_data
+        assert 'aggregate' in funnel_data
+        
+        # Check per-symbol data
+        assert isinstance(funnel_data['per_symbol'], list)
+        assert len(funnel_data['per_symbol']) > 0
+        
+        # Check all required fields exist in per-symbol data
+        for symbol_funnel in funnel_data['per_symbol']:
+            assert 'symbol' in symbol_funnel
+            assert 'zones_detected' in symbol_funnel
+            assert 'zones_fresh' in symbol_funnel
+            assert 'zones_after_curve_filter' in symbol_funnel
+            assert 'zones_after_trend_filter' in symbol_funnel
+            assert 'candidates_scored' in symbol_funnel
+            assert 'rejected_min_setup_score' in symbol_funnel
+            assert 'rejected_min_reward_risk' in symbol_funnel
+            assert 'orders_placed' in symbol_funnel
+            assert 'orders_filled' in symbol_funnel
+            assert 'orders_expired_ttl' in symbol_funnel
+            assert 'trades_closed' in symbol_funnel
+        
+        # Check aggregate data
+        agg = funnel_data['aggregate']
+        assert 'zones_detected' in agg
+        assert 'zones_fresh' in agg
+        assert 'zones_after_curve_filter' in agg
+        assert 'zones_after_trend_filter' in agg
+        assert 'candidates_scored' in agg
+        assert 'rejected_min_setup_score' in agg
+        assert 'rejected_min_reward_risk' in agg
+        assert 'orders_placed' in agg
+        assert 'orders_filled' in agg
+        assert 'orders_expired_ttl' in agg
+        assert 'trades_closed' in agg
+    
+    def test_decision_funnel_internal_consistency(self, temp_config_file, temp_artifacts_dir):
+        """Test that decision funnel counts are internally consistent"""
+        result = run_backtest_experiment(temp_config_file)
+        write_artifacts(result, temp_artifacts_dir)
+        
+        with open(temp_artifacts_dir / 'decision_funnel.json', 'r') as f:
+            funnel_data = json.load(f)
+        
+        # Check each symbol's funnel consistency
+        for symbol_funnel in funnel_data['per_symbol']:
+            # Candidates scored should be <= zones fresh
+            assert symbol_funnel['candidates_scored'] <= symbol_funnel['zones_fresh'], \
+                f"Candidates scored ({symbol_funnel['candidates_scored']}) should be <= zones fresh ({symbol_funnel['zones_fresh']})"
+            
+            # Orders placed should be candidates_scored - rejections
+            total_rejections = (symbol_funnel['rejected_min_setup_score'] + 
+                              symbol_funnel['rejected_min_reward_risk'])
+            assert symbol_funnel['orders_placed'] == symbol_funnel['candidates_scored'] - total_rejections, \
+                f"Orders placed should equal candidates scored minus rejections"
+            
+            # Orders filled should be <= orders placed
+            assert symbol_funnel['orders_filled'] <= symbol_funnel['orders_placed'], \
+                f"Orders filled ({symbol_funnel['orders_filled']}) should be <= orders placed ({symbol_funnel['orders_placed']})"
+            
+            # Trades closed should be <= orders filled
+            assert symbol_funnel['trades_closed'] <= symbol_funnel['orders_filled'], \
+                f"Trades closed ({symbol_funnel['trades_closed']}) should be <= orders filled ({symbol_funnel['orders_filled']})"
+        
+        # Check aggregate consistency
+        agg = funnel_data['aggregate']
+        assert agg['candidates_scored'] <= agg['zones_fresh'], \
+            f"Aggregate: candidates scored should be <= zones fresh"
+        
+        total_agg_rejections = (agg['rejected_min_setup_score'] + 
+                               agg['rejected_min_reward_risk'])
+        assert agg['orders_placed'] == agg['candidates_scored'] - total_agg_rejections, \
+            f"Aggregate: orders placed should equal candidates scored minus rejections"
+        
+        assert agg['orders_filled'] <= agg['orders_placed'], \
+            f"Aggregate: orders filled should be <= orders placed"
+        
+        assert agg['trades_closed'] <= agg['orders_filled'], \
+            f"Aggregate: trades closed should be <= orders filled"

@@ -175,14 +175,21 @@ class DecisionFunnel:
     symbol: str
     zones_detected: int = 0
     zones_fresh: int = 0
-    candidates_evaluated: int = 0
-    rejected_curve: int = 0
-    rejected_trend: int = 0
-    rejected_min_score: int = 0
-    rejected_min_rr: int = 0
+    zones_after_curve_filter: int = 0
+    zones_after_trend_filter: int = 0
+    candidates_scored: int = 0
+    rejected_min_setup_score: int = 0
+    rejected_min_reward_risk: int = 0
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
+    trades_closed: int = 0
+    # Legacy aliases for backward compatibility
+    candidates_evaluated: int = 0  # Deprecated: use candidates_scored
+    rejected_curve: int = 0  # Deprecated: tracked separately now
+    rejected_trend: int = 0  # Deprecated: tracked separately now
+    rejected_min_score: int = 0  # Deprecated: use rejected_min_setup_score
+    rejected_min_rr: int = 0  # Deprecated: use rejected_min_reward_risk
 
 
 @dataclass
@@ -615,6 +622,7 @@ def execute_backtest_for_symbol(
                 
                 # Remove from open positions
                 open_positions.remove(plan)
+                funnel.trades_closed += 1
             else:
                 # No exit, manage trade (update stops if needed)
                 management = manage_trade_plan(
@@ -648,10 +656,11 @@ def execute_backtest_for_symbol(
                     continue
                 
                 # Candidate evaluation
-                funnel.candidates_evaluated += 1
+                # NOTE: In simplified implementation, curve and trend filters are not applied
+                # so zones_after_curve_filter and zones_after_trend_filter remain 0
+                # This would be incremented if curve/trend gating was properly implemented
                 
                 # Score the zone (simplified - use placeholder curve/trend)
-                # Note: In full implementation, curve and trend rejection would be tracked here
                 score = odds_enhancer_score(
                     zone,
                     candle['close'],
@@ -660,9 +669,10 @@ def execute_backtest_for_symbol(
                     params,
                     None  # opposing_zone
                 )
+                funnel.candidates_scored += 1
                 
                 if score < params.min_setup_score:
-                    funnel.rejected_min_score += 1
+                    funnel.rejected_min_setup_score += 1
                     continue
                 
                 # Build trade plan
@@ -676,7 +686,7 @@ def execute_backtest_for_symbol(
                 )
                 
                 if not plan or plan.r_multiple < params.min_reward_risk:
-                    funnel.rejected_min_rr += 1
+                    funnel.rejected_min_reward_risk += 1
                     continue
                 
                 # Place order
@@ -713,6 +723,7 @@ def execute_backtest_for_symbol(
         
         capital += pnl
         equity_curve.append(capital)
+        funnel.trades_closed += 1
     
     if enable_profiling:
         stage_timings['backtest_loop'] = time.time() - stage_start
@@ -1466,38 +1477,53 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
         'aggregate': {
             'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
             'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
-            'candidates_evaluated': sum(f.candidates_evaluated for f in result.decision_funnels),
-            'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
-            'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
-            'rejected_min_score': sum(f.rejected_min_score for f in result.decision_funnels),
-            'rejected_min_rr': sum(f.rejected_min_rr for f in result.decision_funnels),
+            'zones_after_curve_filter': sum(f.zones_after_curve_filter for f in result.decision_funnels),
+            'zones_after_trend_filter': sum(f.zones_after_trend_filter for f in result.decision_funnels),
+            'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
+            'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
+            'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
+            'trades_closed': sum(f.trades_closed for f in result.decision_funnels),
         }
     }
     with open(artifacts_dir / 'decision_funnel.json', 'w') as f:
         json.dump(funnel_data, f, indent=2)
     
-    # Print compact decision funnel table
+    # Print per-symbol compact decision funnel table
     print("\n" + "=" * 80)
-    print("DECISION FUNNEL")
+    print("DECISION FUNNEL (Per Symbol)")
+    print("=" * 80)
+    for f in result.decision_funnels:
+        # Format: BTCUSDT | zones 3358 → fresh 32 → curve 9 → trend 4 → score 2 → RR 0 → orders 0
+        curve_part = f"curve {f.zones_after_curve_filter} → " if f.zones_after_curve_filter > 0 else ""
+        trend_part = f"trend {f.zones_after_trend_filter} → " if f.zones_after_trend_filter > 0 else ""
+        print(f"{f.symbol:10s} | zones {f.zones_detected:4d} → fresh {f.zones_fresh:3d} → "
+              f"{curve_part}{trend_part}"
+              f"score {f.candidates_scored:3d} → RR {f.rejected_min_reward_risk:3d} → "
+              f"orders {f.orders_placed:3d}")
+    
+    # Print aggregate decision funnel
+    print("\n" + "=" * 80)
+    print("DECISION FUNNEL (Aggregate)")
     print("=" * 80)
     agg = funnel_data['aggregate']
-    print(f"Zones Detected:        {agg['zones_detected']}")
-    print(f"  └─ Fresh:            {agg['zones_fresh']}")
-    print(f"Candidates Evaluated:  {agg['candidates_evaluated']}")
-    if agg['rejected_curve'] > 0:
-        print(f"  ├─ Rejected (Curve): {agg['rejected_curve']}")
-    if agg['rejected_trend'] > 0:
-        print(f"  ├─ Rejected (Trend): {agg['rejected_trend']}")
-    if agg['rejected_min_score'] > 0:
-        print(f"  ├─ Rejected (Score): {agg['rejected_min_score']}")
-    if agg['rejected_min_rr'] > 0:
-        print(f"  └─ Rejected (Min R): {agg['rejected_min_rr']}")
-    print(f"Orders Placed:         {agg['orders_placed']}")
-    print(f"  ├─ Filled:           {agg['orders_filled']}")
-    print(f"  └─ Expired (TTL):    {agg['orders_expired_ttl']}")
+    print(f"Zones Detected:              {agg['zones_detected']}")
+    print(f"  └─ Fresh:                  {agg['zones_fresh']}")
+    if agg['zones_after_curve_filter'] > 0:
+        print(f"  └─ After Curve Filter:     {agg['zones_after_curve_filter']}")
+    if agg['zones_after_trend_filter'] > 0:
+        print(f"  └─ After Trend Filter:     {agg['zones_after_trend_filter']}")
+    print(f"Candidates Scored:           {agg['candidates_scored']}")
+    if agg['rejected_min_setup_score'] > 0:
+        print(f"  ├─ Rejected (Min Score):   {agg['rejected_min_setup_score']}")
+    if agg['rejected_min_reward_risk'] > 0:
+        print(f"  └─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
+    print(f"Orders Placed:               {agg['orders_placed']}")
+    print(f"  ├─ Filled:                 {agg['orders_filled']}")
+    print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")
+    print(f"Trades Closed:               {agg['trades_closed']}")
     print("=" * 80)
     
     print(f"\nArtifacts written to: {artifacts_dir}")
