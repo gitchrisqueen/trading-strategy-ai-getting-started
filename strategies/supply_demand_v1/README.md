@@ -837,6 +837,16 @@ For each trade:
 
 The strategy includes a dedicated experiment runner for repeatable backtests across multiple symbols and time ranges. This generates machine-readable artifacts for comparing runs between PRs.
 
+### Performance
+
+**Optimized backtesting performance:**
+- 25x speedup from v1.0 (freshness tracking optimization)
+- Typical runtime: 0.17s for 5 symbols, 3 months (5,000 candles)
+- Large dataset: 47s for 1 symbol, 1 year (35,000 candles)
+- Linear scaling with data size
+
+**For detailed performance tips, benchmarks, and troubleshooting, see [Performance Guide](../../docs/PERFORMANCE_GUIDE.md).**
+
 ### Quick Start
 
 Run a backtest experiment using the CLI:
