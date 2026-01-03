@@ -125,8 +125,12 @@ class Zone:
         legout_len: Number of candles in the leg-out
         freshness_touches: Number of times price returned to zone after creation
         legout_return: Percentage return of the leg-out move
-        is_fresh: Whether zone has not been revisited
+        first_touch_idx: Index when zone was first touched (None if never touched)
+        ever_touched: Whether zone was EVER touched (final state, NOT time-relative)
         last_checked_idx: Last candle index where freshness was checked (for incremental updates)
+        
+        DEPRECATED FIELDS (for backward compatibility):
+        is_fresh: DEPRECATED - Use is_zone_fresh_at_idx() instead for time-relative freshness
     """
     zone_type: ZoneType
     proximal: float
@@ -140,8 +144,12 @@ class Zone:
     created_time: Optional[Any] = None
     freshness_touches: int = 0
     legout_return: float = 0.0
-    is_fresh: bool = True
+    # Time-relative freshness fields
+    first_touch_idx: Optional[int] = None  # Index when first touched (None = never)
+    ever_touched: bool = False  # Final state: was zone ever touched?
     last_checked_idx: int = -1  # Track last checked index for incremental updates
+    # DEPRECATED: Use is_zone_fresh_at_idx() for time-relative freshness
+    is_fresh: bool = True  # Kept for backward compatibility only
 
 
 @dataclass

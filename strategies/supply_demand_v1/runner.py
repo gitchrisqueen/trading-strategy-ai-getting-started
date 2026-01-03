@@ -911,8 +911,13 @@ def execute_backtest_for_symbol(
     funnel = DecisionFunnel(symbol=symbol)
     funnel.zones_detected_ltf = len(ltf_zones)
     funnel.zones_detected_htf = len(htf_zones)
-    funnel.zones_fresh_ltf = len([z for z in ltf_zones if z.is_fresh])
-    funnel.zones_fresh_htf = len([z for z in htf_zones if z.is_fresh])
+    
+    # Count fresh zones at start of simulation (index 0 for zones, but typically we start at index 100+)
+    # Use the first meaningful simulation index (100) to count fresh zones
+    # This represents "zones that are fresh when we start analyzing them"
+    simulation_start_idx = 100  # Typical start index in the loop
+    funnel.zones_fresh_ltf = sum(1 for z in ltf_zones if z.created_at <= simulation_start_idx and is_zone_fresh_at_idx(z, simulation_start_idx))
+    funnel.zones_fresh_htf = sum(1 for z in htf_zones if z.created_at <= simulation_start_idx and is_zone_fresh_at_idx(z, simulation_start_idx))
     
     # Legacy fields for backward compatibility
     funnel.zones_detected = funnel.zones_detected_ltf
@@ -1259,8 +1264,13 @@ def execute_backtest_for_symbol(
         stage_start = time.time()
     
     # Convert zones to dicts for output (LTF zones only, as these are the entry zones)
+    # Calculate final freshness at end of simulation
+    end_idx = len(ltf_candles) - 1
     zone_dicts = []
     for zone in ltf_zones:
+        # Calculate final_is_fresh: is zone fresh at the END of the simulation?
+        final_is_fresh = is_zone_fresh_at_idx(zone, end_idx)
+        
         zone_dicts.append({
             'symbol': symbol,
             'zone_type': zone.zone_type.value,
@@ -1271,7 +1281,11 @@ def execute_backtest_for_symbol(
             'legout_len': zone.legout_len,
             'legout_return': zone.legout_return,
             'freshness_touches': zone.freshness_touches,
-            'is_fresh': zone.is_fresh,
+            'first_touch_idx': zone.first_touch_idx,  # When first touched (None if never)
+            'ever_touched': zone.ever_touched,  # Was it EVER touched?
+            'final_is_fresh': final_is_fresh,  # Is it fresh at END of simulation?
+            # DEPRECATED: kept for backward compatibility
+            'is_fresh': zone.is_fresh,  # Same as ever_touched (inverted)
         })
     
     if enable_profiling:
@@ -1976,7 +1990,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             expected_columns = [
                 'symbol', 'zone_type', 'proximal', 'distal',
                 'created_at', 'base_len', 'legout_len', 'legout_return',
-                'freshness_touches', 'is_fresh'
+                'freshness_touches', 'first_touch_idx', 'ever_touched', 
+                'final_is_fresh', 'is_fresh'  # is_fresh kept for backward compat
             ]
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
