@@ -486,16 +486,16 @@ class TestMultiSymbolIsolation:
                         "Indicates duplicate candle data."
                     )
             
-            # Verify no curve_state or trend_state in trades.csv
+            # Verify curve_state and trend_state ARE NOW in trades.csv (MTF implemented)
             with open(temp_artifacts_dir / 'trades.csv', 'r') as f:
                 reader = csv.DictReader(f)
                 fieldnames = reader.fieldnames
                 
-                assert 'curve_state' not in fieldnames, (
-                    "curve_state should not be in trades.csv (not implemented)"
+                assert 'curve_state' in fieldnames, (
+                    "curve_state should be in trades.csv (MTF now implemented)"
                 )
-                assert 'trend_state' not in fieldnames, (
-                    "trend_state should not be in trades.csv (not implemented)"
+                assert 'trend_state' in fieldnames, (
+                    "trend_state should be in trades.csv (MTF now implemented)"
                 )
                 
         finally:

@@ -80,11 +80,29 @@ import bisect
 
 
 # ============================================================================
+# Utility Functions
+# ============================================================================
+
+def enum_to_string(enum_value: Any) -> str:
+    """Convert enum value to string, handling both enum types and plain strings
+    
+    Args:
+        enum_value: Either an enum (with .value attribute) or a string
+    
+    Returns:
+        String representation of the value
+    """
+    if hasattr(enum_value, 'value'):
+        return enum_value.value
+    return str(enum_value)
+
+
+# ============================================================================
 # Multi-Timeframe Timestamp Mapping
 # ============================================================================
 
 def find_htf_index_at_ltf_timestamp(
-    ltf_timestamp: Any,
+    ltf_timestamp: datetime,
     htf_candles: List[Dict[str, Any]]
 ) -> Optional[int]:
     """Find the most recent HTF candle index at or before LTF timestamp
@@ -92,7 +110,7 @@ def find_htf_index_at_ltf_timestamp(
     Uses binary search for O(log n) lookup.
     
     Args:
-        ltf_timestamp: Current LTF candle timestamp
+        ltf_timestamp: Current LTF candle timestamp (datetime object)
         htf_candles: List of HTF candles with 'timestamp' field
     
     Returns:
@@ -122,7 +140,7 @@ def find_htf_index_at_ltf_timestamp(
 
 
 def find_itf_index_at_ltf_timestamp(
-    ltf_timestamp: Any,
+    ltf_timestamp: datetime,
     itf_candles: List[Dict[str, Any]]
 ) -> Optional[int]:
     """Find the most recent ITF candle index at or before LTF timestamp
@@ -130,7 +148,7 @@ def find_itf_index_at_ltf_timestamp(
     Uses binary search for O(log n) lookup.
     
     Args:
-        ltf_timestamp: Current LTF candle timestamp
+        ltf_timestamp: Current LTF candle timestamp (datetime object)
         itf_candles: List of ITF candles with 'timestamp' field
     
     Returns:
@@ -1008,8 +1026,8 @@ def execute_backtest_for_symbol(
                         'exit_idx': None,
                         'exit_reason': None,
                         'score': plan.score,
-                        'curve_state': curve_state.value,  # Now properly tracked
-                        'trend_state': trend_state.value,  # Now properly tracked
+                        'curve_state': enum_to_string(curve_state),  # Now properly tracked
+                        'trend_state': enum_to_string(trend_state),  # Now properly tracked
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
                         'position_size': plan.position_size,
@@ -1102,8 +1120,8 @@ def execute_backtest_for_symbol(
                 
                 # Apply MTF gating BEFORE scoring (performance optimization)
                 # Convert curve and trend to string format for should_allow_trade
-                curve_str = curve_state.value if isinstance(curve_state, CurveLocation) else str(curve_state)
-                trend_str = trend_state.value if isinstance(trend_state, TrendDirection) else str(trend_state)
+                curve_str = enum_to_string(curve_state)
+                trend_str = enum_to_string(trend_state)
                 
                 # Placeholder score for gating check (we'll compute actual score after gating)
                 base_score = 0.0
@@ -1118,21 +1136,13 @@ def execute_backtest_for_symbol(
                 )
                 
                 if not allowed:
-                    # Track rejection reason
-                    if curve_str == "HIGH" and zone.zone_type == ZoneType.DEMAND:
+                    # Track rejection reason (simplified logic)
+                    if curve_str in ["high", "low"]:
+                        # Rejected due to curve position (HIGH blocks DEMAND, LOW blocks SUPPLY)
                         funnel.rejected_curve += 1
-                    elif curve_str == "LOW" and zone.zone_type == ZoneType.SUPPLY:
-                        funnel.rejected_curve += 1
-                    elif curve_str == "EQ":
-                        # Could be trend rejection or score threshold rejection
-                        if trend_str == "SIDEWAYS":
-                            funnel.rejected_trend += 1
-                        else:
-                            # Check if it's due to trend misalignment
-                            if zone.zone_type == ZoneType.DEMAND and trend_str == "DOWN":
-                                funnel.rejected_trend += 1
-                            elif zone.zone_type == ZoneType.SUPPLY and trend_str == "UP":
-                                funnel.rejected_trend += 1
+                    else:
+                        # Rejected due to trend misalignment or sideways (for EQ zones)
+                        funnel.rejected_trend += 1
                     continue
                 
                 # Passed gating - now score the zone
@@ -1208,8 +1218,8 @@ def execute_backtest_for_symbol(
                     'filled_time': None,
                     'fill_price': None,
                     'cancel_reason': None,
-                    'curve_state': curve_state.value,
-                    'trend_state': trend_state.value,
+                    'curve_state': enum_to_string(curve_state),
+                    'trend_state': enum_to_string(trend_state),
                 })
     
     # Close any remaining open positions at EOD (end of data)
@@ -1947,7 +1957,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
                 'symbol', 'side', 'entry', 'stop', 'target',
                 'planned_R', 'planned_r', 'realized_R', 
                 'entry_time', 'entry_idx', 'exit_time', 'exit_idx',
-                'exit_reason', 'score', 'zone_created_at', 'pnl', 'position_size'
+                'exit_reason', 'score', 'curve_state', 'trend_state',
+                'zone_created_at', 'pnl', 'position_size'
             ]
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
