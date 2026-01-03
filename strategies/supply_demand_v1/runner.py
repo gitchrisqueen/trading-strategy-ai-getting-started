@@ -97,6 +97,30 @@ def enum_to_string(enum_value: Any) -> str:
     return str(enum_value)
 
 
+def make_zone_id(symbol: str, zone: Zone) -> str:
+    """Create a stable, unique identifier for a zone
+    
+    Uses immutable fields that define a zone uniquely:
+    - symbol: Trading pair
+    - created_at: Index where zone was created
+    - zone_type: SUPPLY or DEMAND
+    - proximal: Entry reference price
+    - distal: Stop reference price
+    
+    Args:
+        symbol: Trading pair symbol
+        zone: Zone object
+    
+    Returns:
+        Unique string identifier for the zone
+    
+    Example:
+        "BTCUSDT_1234_demand_100.5_99.0"
+    """
+    zone_type_str = zone.zone_type.value if hasattr(zone.zone_type, 'value') else str(zone.zone_type)
+    return f"{symbol}_{zone.created_at}_{zone_type_str}_{zone.proximal}_{zone.distal}"
+
+
 # ============================================================================
 # Multi-Timeframe Timestamp Mapping
 # ============================================================================
@@ -1027,14 +1051,23 @@ def execute_backtest_for_symbol(
     
     # OPTIMIZATION: Build active zone manager (Phase 4)
     # Pre-bucket zones by created_at for O(1) zone activation
+    # Store tuples of (zone_id, zone) for stable identification
     ltf_zones_by_creation = {}
     for zone in ltf_zones:
+        zone_id = make_zone_id(symbol, zone)
         if zone.created_at not in ltf_zones_by_creation:
             ltf_zones_by_creation[zone.created_at] = []
-        ltf_zones_by_creation[zone.created_at].append(zone)
+        ltf_zones_by_creation[zone.created_at].append((zone_id, zone))
     
-    # Track active zones (created but still fresh)
-    active_zones = set()  # Zones that are created and fresh at current index
+    # Track active zones (created but still fresh) using Dict[zone_id, zone]
+    # This avoids hashability issues with mutable Zone dataclass objects
+    active_zones: Dict[str, Zone] = {}
+    
+    # Track activation metrics (for debugging and validation)
+    total_activations = 0
+    max_active_zones = 0
+    active_zones_sum = 0  # For calculating average
+    active_zones_samples = 0
     
     # Simulate backtest bar by bar on LTF
     for ltf_idx in range(len(ltf_candles)):
@@ -1232,21 +1265,29 @@ def execute_backtest_for_symbol(
         # OPTIMIZATION: Update active zones at this index (Phase 4)
         # Add newly created zones
         if ltf_idx in ltf_zones_by_creation:
-            for zone in ltf_zones_by_creation[ltf_idx]:
-                active_zones.add(zone)
+            for zone_id, zone in ltf_zones_by_creation[ltf_idx]:
+                active_zones[zone_id] = zone
+                total_activations += 1
         
         # Remove zones that just became non-fresh
-        zones_to_remove = []
-        for zone in active_zones:
+        # IMPORTANT: Collect zone_ids first, then delete after iteration
+        zone_ids_to_remove = []
+        for zone_id, zone in active_zones.items():
             if not is_zone_fresh_at_idx(zone, ltf_idx):
-                zones_to_remove.append(zone)
-        for zone in zones_to_remove:
-            active_zones.discard(zone)
+                zone_ids_to_remove.append(zone_id)
+        for zone_id in zone_ids_to_remove:
+            del active_zones[zone_id]
+        
+        # Update tracking metrics
+        active_zones_sum += len(active_zones)
+        active_zones_samples += 1
+        if len(active_zones) > max_active_zones:
+            max_active_zones = len(active_zones)
         
         # Look for new setups - only check ACTIVE zones (Phase 4 + Phase 5)
         if ltf_idx > 100:  # Need some history for analysis
-            for zone in active_zones:
-                # Zone is guaranteed to be created and fresh (by active_zones set)
+            for zone_id, zone in active_zones.items():
+                # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
                 # Check if we already have a pending order or position for this zone
                 zone_already_traded = any(
@@ -1390,6 +1431,34 @@ def execute_backtest_for_symbol(
             capital += pnl
             equity_curve.append(capital)
             funnel.trades_closed += 1
+    
+    # Calculate and print runtime sanity metrics
+    avg_active_zones = active_zones_sum / active_zones_samples if active_zones_samples > 0 else 0.0
+    
+    # Print activation metrics (useful for debugging)
+    print(f"\n{'='*80}")
+    print(f"ACTIVE ZONE MANAGER METRICS - {symbol}")
+    print(f"{'='*80}")
+    print(f"{'Total Activations':30s}: {total_activations}")
+    print(f"{'Max Active Zones':30s}: {max_active_zones}")
+    print(f"{'Avg Active Zones':30s}: {avg_active_zones:.2f}")
+    print(f"{'Zones Detected (LTF)':30s}: {len(ltf_zones)}")
+    print(f"{'Candidates Scored':30s}: {funnel.candidates_scored}")
+    print(f"{'Orders Placed':30s}: {funnel.orders_placed}")
+    
+    # Sanity check: If zones detected but no activations, something is wrong
+    if len(ltf_zones) > 0 and total_activations == 0:
+        print(f"\n⚠️  WARNING: {len(ltf_zones)} zones detected but ZERO activations!")
+        print(f"   This indicates ltf_zones_by_creation is not being populated correctly.")
+        print(f"   Check that zone.created_at values are within [0, {len(ltf_candles)-1}]")
+        
+        # Debug info: Show created_at range
+        created_at_values = [z.created_at for z in ltf_zones]
+        if created_at_values:
+            print(f"   Zone created_at range: [{min(created_at_values)}, {max(created_at_values)}]")
+            print(f"   LTF candle index range: [0, {len(ltf_candles)-1}]")
+    
+    print(f"{'='*80}\n")
     
     if enable_profiling:
         stage_timings['backtest_loop'] = time.time() - stage_start
