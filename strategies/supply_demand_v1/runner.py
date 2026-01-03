@@ -59,6 +59,8 @@ from strategies.supply_demand_v1.strategy import (
     check_intrabar_exit,
     manage_trade_plan,
     calculate_pnl_with_costs,
+    check_polarity_flip,
+    get_zone_polarity_at_idx,
 )
 
 from strategies.supply_demand_v1.integrity import (
@@ -1068,6 +1070,12 @@ def execute_backtest_for_symbol(
     # This avoids hashability issues with mutable Zone dataclass objects
     active_zones: Dict[str, Zone] = {}
     
+    # PERFORMANCE: Flip boundary index for O(log Z) polarity flip checks
+    # Maintain sorted list of (distal, zone_id) for active zones
+    # Only check zones where distal is between prev_close and current_close
+    flip_boundary_index = []  # List of (distal, zone_id) tuples, kept sorted
+    zone_id_to_distal = {}  # For efficient removal: zone_id -> distal
+    
     # Track activation metrics (for debugging and validation)
     total_activations = 0
     max_active_zones = 0
@@ -1078,6 +1086,10 @@ def execute_backtest_for_symbol(
     total_flips = 0
     flips_supply_to_demand = 0
     flips_demand_to_supply = 0
+    
+    # Track flip check efficiency
+    flip_checks_total = 0
+    flip_checks_samples = 0
     
     # Track previous close for polarity flip detection
     prev_close = None
@@ -1291,6 +1303,11 @@ def execute_backtest_for_symbol(
             for zone_id, zone in ltf_zones_by_creation[ltf_idx]:
                 active_zones[zone_id] = zone
                 total_activations += 1
+                
+                # PERFORMANCE: Add to flip boundary index
+                distal = zone.distal
+                bisect.insort(flip_boundary_index, (distal, zone_id))
+                zone_id_to_distal[zone_id] = distal
         
         # Remove zones that just became non-fresh
         # IMPORTANT: Collect zone_ids first, then delete after iteration
@@ -1298,8 +1315,18 @@ def execute_backtest_for_symbol(
         for zone_id, zone in active_zones.items():
             if not is_zone_fresh_at_idx(zone, ltf_idx):
                 zone_ids_to_remove.append(zone_id)
+        
         for zone_id in zone_ids_to_remove:
             del active_zones[zone_id]
+            
+            # PERFORMANCE: Remove from flip boundary index
+            if zone_id in zone_id_to_distal:
+                distal = zone_id_to_distal[zone_id]
+                try:
+                    flip_boundary_index.remove((distal, zone_id))
+                except ValueError:
+                    pass  # Already removed or not present
+                del zone_id_to_distal[zone_id]
         
         # Update tracking metrics
         active_zones_sum += len(active_zones)
@@ -1307,13 +1334,29 @@ def execute_backtest_for_symbol(
         if len(active_zones) > max_active_zones:
             max_active_zones = len(active_zones)
         
-        # Update polarity for active zones (event-driven, O(active_zones) per candle)
-        # Only update zones that could have flipped based on price crossing their distal boundary
-        if prev_close is not None and ltf_idx > 0:
-            for zone_id, zone in active_zones.items():
-                # Check if polarity should flip
-                from strategies.supply_demand_v1.strategy import check_polarity_flip, get_zone_polarity_at_idx
+        # PERFORMANCE: Update polarity for zones whose flip boundary was crossed
+        # Only check zones where distal is between prev_close and current_close
+        if prev_close is not None and ltf_idx > 0 and len(flip_boundary_index) > 0:
+            lo = min(prev_close, current_close)
+            hi = max(prev_close, current_close)
+            
+            # Use bisect to find zones with distal in (lo, hi]
+            # Find leftmost index where distal > lo
+            left_idx = bisect.bisect_left(flip_boundary_index, (lo, ''))
+            # Find rightmost index where distal <= hi
+            right_idx = bisect.bisect_right(flip_boundary_index, (hi, '\uffff'))
+            
+            # Only check candidate zones (those whose distal was crossed)
+            candidate_zones = flip_boundary_index[left_idx:right_idx]
+            flip_checks_total += len(candidate_zones)
+            flip_checks_samples += 1
+            
+            for distal, zone_id in candidate_zones:
+                # Verify zone is still active (lazy deletion guard)
+                if zone_id not in active_zones:
+                    continue
                 
+                zone = active_zones[zone_id]
                 polarity_before = get_zone_polarity_at_idx(zone, ltf_idx - 1)
                 flipped = check_polarity_flip(zone, ltf_idx, current_close, prev_close)
                 
@@ -1492,6 +1535,7 @@ def execute_backtest_for_symbol(
     
     # Calculate and print runtime sanity metrics
     avg_active_zones = active_zones_sum / active_zones_samples if active_zones_samples > 0 else 0.0
+    avg_flip_checks = flip_checks_total / flip_checks_samples if flip_checks_samples > 0 else 0.0
     
     # Print activation metrics (useful for debugging)
     print(f"\n{'='*80}")
@@ -1503,6 +1547,14 @@ def execute_backtest_for_symbol(
     print(f"{'Zones Detected (LTF)':30s}: {len(ltf_zones)}")
     print(f"{'Candidates Scored':30s}: {funnel.candidates_scored}")
     print(f"{'Orders Placed':30s}: {funnel.orders_placed}")
+    print(f"")
+    print(f"{'='*80}")
+    print(f"POLARITY FLIP PERFORMANCE - {symbol}")
+    print(f"{'='*80}")
+    print(f"{'Total Flips':30s}: {total_flips}")
+    print(f"{'Avg Flip Checks/Candle':30s}: {avg_flip_checks:.2f}")
+    print(f"{'Flip Check Efficiency':30s}: {(avg_flip_checks / avg_active_zones * 100 if avg_active_zones > 0 else 0):.1f}% of active zones")
+    print(f"{'Expected if no index':30s}: {avg_active_zones:.2f} checks/candle")
     
     # Sanity check: If zones detected but no activations, something is wrong
     if len(ltf_zones) > 0 and total_activations == 0:
