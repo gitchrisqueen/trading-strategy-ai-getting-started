@@ -19,6 +19,7 @@ from strategies.supply_demand_v1.runner import (
     run_backtest_experiment,
     write_artifacts,
     generate_synthetic_candles,
+    generate_synthetic_candles_mtf,
     execute_backtest_for_symbol,
     ExperimentResult,
 )
@@ -304,11 +305,13 @@ class TestSymbolBacktest:
     def test_execute_backtest_for_symbol(self):
         """Test executing backtest for a single symbol"""
         params = SupplyDemandParameters()
-        candles = generate_synthetic_candles('BTC/USDT', 200, seed=42)
         
-        trades, zones, final_capital, equity_curve, decision_funnel = execute_backtest_for_symbol(
+        # Generate MTF candles
+        candles_by_tf = generate_synthetic_candles_mtf('BTC/USDT', 200, seed=42)
+        
+        trades, zones, orders, final_capital, equity_curve, decision_funnel = execute_backtest_for_symbol(
             'BTC/USDT',
-            candles,
+            candles_by_tf,
             params,
             10000.0
         )
@@ -316,6 +319,7 @@ class TestSymbolBacktest:
         # Check outputs exist
         assert isinstance(trades, list)
         assert isinstance(zones, list)
+        assert isinstance(orders, list)
         assert isinstance(final_capital, float)
         assert isinstance(equity_curve, list)
         
@@ -482,16 +486,16 @@ class TestMultiSymbolIsolation:
                         "Indicates duplicate candle data."
                     )
             
-            # Verify no curve_state or trend_state in trades.csv
+            # Verify curve_state and trend_state ARE NOW in trades.csv (MTF implemented)
             with open(temp_artifacts_dir / 'trades.csv', 'r') as f:
                 reader = csv.DictReader(f)
                 fieldnames = reader.fieldnames
                 
-                assert 'curve_state' not in fieldnames, (
-                    "curve_state should not be in trades.csv (not implemented)"
+                assert 'curve_state' in fieldnames, (
+                    "curve_state should be in trades.csv (MTF now implemented)"
                 )
-                assert 'trend_state' not in fieldnames, (
-                    "trend_state should not be in trades.csv (not implemented)"
+                assert 'trend_state' in fieldnames, (
+                    "trend_state should be in trades.csv (MTF now implemented)"
                 )
                 
         finally:

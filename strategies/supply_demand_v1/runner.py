@@ -76,6 +76,106 @@ from strategies.supply_demand_v1.data_loader import (
     HistoricalDataError,
 )
 
+import bisect
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+def enum_to_string(enum_value: Any) -> str:
+    """Convert enum value to string, handling both enum types and plain strings
+    
+    Args:
+        enum_value: Either an enum (with .value attribute) or a string
+    
+    Returns:
+        String representation of the value
+    """
+    if hasattr(enum_value, 'value'):
+        return enum_value.value
+    return str(enum_value)
+
+
+# ============================================================================
+# Multi-Timeframe Timestamp Mapping
+# ============================================================================
+
+def find_htf_index_at_ltf_timestamp(
+    ltf_timestamp: datetime,
+    htf_candles: List[Dict[str, Any]]
+) -> Optional[int]:
+    """Find the most recent HTF candle index at or before LTF timestamp
+    
+    Uses binary search for O(log n) lookup.
+    
+    Args:
+        ltf_timestamp: Current LTF candle timestamp (datetime object)
+        htf_candles: List of HTF candles with 'timestamp' field
+    
+    Returns:
+        Index of most recent HTF candle, or None if no valid HTF candle found
+    
+    Example:
+        LTF: [10:00, 10:15, 10:30, 10:45, 11:00]
+        HTF: [09:00, 10:00, 11:00]
+        
+        ltf_timestamp=10:30 -> returns htf_idx=1 (10:00 candle)
+        ltf_timestamp=11:00 -> returns htf_idx=2 (11:00 candle)
+    """
+    if not htf_candles:
+        return None
+    
+    # Extract timestamps for binary search
+    htf_timestamps = [c['timestamp'] for c in htf_candles]
+    
+    # Find rightmost HTF timestamp <= ltf_timestamp
+    idx = bisect.bisect_right(htf_timestamps, ltf_timestamp) - 1
+    
+    # Return None if no HTF candle is before or at ltf_timestamp
+    if idx < 0:
+        return None
+    
+    return idx
+
+
+def find_itf_index_at_ltf_timestamp(
+    ltf_timestamp: datetime,
+    itf_candles: List[Dict[str, Any]]
+) -> Optional[int]:
+    """Find the most recent ITF candle index at or before LTF timestamp
+    
+    Uses binary search for O(log n) lookup.
+    
+    Args:
+        ltf_timestamp: Current LTF candle timestamp (datetime object)
+        itf_candles: List of ITF candles with 'timestamp' field
+    
+    Returns:
+        Index of most recent ITF candle, or None if no valid ITF candle found
+    
+    Example:
+        LTF: [10:00, 10:15, 10:30, 10:45, 11:00]
+        ITF: [09:00, 10:00, 11:00]
+        
+        ltf_timestamp=10:30 -> returns itf_idx=1 (10:00 candle)
+        ltf_timestamp=11:00 -> returns itf_idx=2 (11:00 candle)
+    """
+    if not itf_candles:
+        return None
+    
+    # Extract timestamps for binary search
+    itf_timestamps = [c['timestamp'] for c in itf_candles]
+    
+    # Find rightmost ITF timestamp <= ltf_timestamp
+    idx = bisect.bisect_right(itf_timestamps, ltf_timestamp) - 1
+    
+    # Return None if no ITF candle is before or at ltf_timestamp
+    if idx < 0:
+        return None
+    
+    return idx
+
 
 def calculate_max_drawdown(equity_curve: List[float]) -> float:
     """Calculate maximum drawdown from an equity curve
@@ -197,17 +297,25 @@ class OrderRecord:
 class DecisionFunnel:
     """Decision funnel metrics for tracking why trades were/weren't taken"""
     symbol: str
-    zones_detected: int = 0
-    zones_fresh: int = 0
-    zones_after_curve_filter: int = 0
-    zones_after_trend_filter: int = 0
-    candidates_scored: int = 0
+    zones_detected_ltf: int = 0  # LTF zones detected
+    zones_detected_htf: int = 0  # HTF zones detected
+    zones_fresh_ltf: int = 0     # LTF zones that are fresh
+    zones_fresh_htf: int = 0     # HTF zones that are fresh
+    rejected_curve: int = 0      # Rejected by curve gating
+    rejected_trend: int = 0      # Rejected by trend gating
+    candidates_scored: int = 0   # Candidates that passed gating and were scored
     rejected_min_setup_score: int = 0
     rejected_min_reward_risk: int = 0
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
     trades_closed: int = 0
+    
+    # Legacy fields for backward compatibility (deprecated)
+    zones_detected: int = 0
+    zones_fresh: int = 0
+    zones_after_curve_filter: int = 0
+    zones_after_trend_filter: int = 0
 
 
 @dataclass
@@ -313,6 +421,124 @@ def generate_synthetic_candles(
         timestamp = timestamp + timedelta(minutes=15)  # 15m candles
     
     return candles
+
+
+def generate_synthetic_candles_mtf(
+    symbol: str,
+    num_ltf_candles: int,
+    ltf_interval_minutes: int = 15,
+    htf_interval_minutes: int = 240,  # 4h
+    itf_interval_minutes: int = 60,   # 1h
+    base_price: float = 100.0,
+    volatility: float = 0.02,
+    seed: Optional[int] = None
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Generate synthetic candles for multiple timeframes (HTF, ITF, LTF)
+    
+    Creates aligned multi-timeframe candle data where higher timeframe candles
+    are aggregated from lower timeframe movements.
+    
+    Args:
+        symbol: Trading pair symbol
+        num_ltf_candles: Number of LTF candles to generate
+        ltf_interval_minutes: LTF candle interval in minutes (default 15m)
+        htf_interval_minutes: HTF candle interval in minutes (default 240m = 4h)
+        itf_interval_minutes: ITF candle interval in minutes (default 60m = 1h)
+        base_price: Starting price
+        volatility: Price movement volatility (0.02 = 2%)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        Dict with keys 'ltf', 'itf', 'htf' containing candle lists
+    """
+    if seed is not None:
+        random.seed(seed)
+    
+    # Generate LTF candles first
+    ltf_candles = []
+    current_price = base_price
+    timestamp = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    
+    for i in range(num_ltf_candles):
+        # Random walk with trend bias
+        trend_bias = random.choice([-1, 0, 1]) * volatility * 0.5
+        price_change = random.gauss(trend_bias, volatility)
+        
+        # Open price
+        open_price = current_price
+        
+        # Close price
+        close_price = open_price * (1 + price_change)
+        
+        # High and low with realistic wicks
+        wick_size = abs(price_change) * random.uniform(0.3, 0.7)
+        if close_price > open_price:  # Bullish candle
+            high = close_price * (1 + wick_size)
+            low = open_price * (1 - wick_size)
+        else:  # Bearish candle
+            high = open_price * (1 + wick_size)
+            low = close_price * (1 - wick_size)
+        
+        # Volume (random but realistic)
+        volume = random.uniform(100000, 1000000)
+        
+        candle = {
+            'open': open_price,
+            'high': high,
+            'low': low,
+            'close': close_price,
+            'volume': volume,
+            'timestamp': timestamp,
+            'symbol': symbol,
+        }
+        ltf_candles.append(candle)
+        
+        current_price = close_price
+        timestamp = timestamp + timedelta(minutes=ltf_interval_minutes)
+    
+    # Aggregate LTF candles into ITF candles
+    itf_candles = []
+    ltf_per_itf = itf_interval_minutes // ltf_interval_minutes
+    for i in range(0, len(ltf_candles), ltf_per_itf):
+        chunk = ltf_candles[i:i+ltf_per_itf]
+        if not chunk:
+            continue
+        
+        itf_candle = {
+            'open': chunk[0]['open'],
+            'high': max(c['high'] for c in chunk),
+            'low': min(c['low'] for c in chunk),
+            'close': chunk[-1]['close'],
+            'volume': sum(c['volume'] for c in chunk),
+            'timestamp': chunk[0]['timestamp'],
+            'symbol': symbol,
+        }
+        itf_candles.append(itf_candle)
+    
+    # Aggregate LTF candles into HTF candles
+    htf_candles = []
+    ltf_per_htf = htf_interval_minutes // ltf_interval_minutes
+    for i in range(0, len(ltf_candles), ltf_per_htf):
+        chunk = ltf_candles[i:i+ltf_per_htf]
+        if not chunk:
+            continue
+        
+        htf_candle = {
+            'open': chunk[0]['open'],
+            'high': max(c['high'] for c in chunk),
+            'low': min(c['low'] for c in chunk),
+            'close': chunk[-1]['close'],
+            'volume': sum(c['volume'] for c in chunk),
+            'timestamp': chunk[0]['timestamp'],
+            'symbol': symbol,
+        }
+        htf_candles.append(htf_candle)
+    
+    return {
+        'ltf': ltf_candles,
+        'itf': itf_candles,
+        'htf': htf_candles,
+    }
 
 
 def load_candles_from_config(
@@ -464,18 +690,172 @@ def load_candles_from_config(
         )
 
 
+def load_candles_mtf_from_config(
+    symbol: str,
+    config: Dict[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Load candles for all timeframes (HTF, ITF, LTF) based on config
+    
+    Args:
+        symbol: Trading symbol
+        config: Experiment configuration with 'timeframes' section
+    
+    Returns:
+        Dict with keys 'ltf', 'itf', 'htf' containing candle lists
+    
+    Raises:
+        HistoricalDataError: If historical data requested but unavailable
+        ValueError: If data_source is invalid or timeframes not specified
+    """
+    data_source = config.get('data_source', 'synthetic')
+    
+    # Get timeframe specifications
+    timeframes = config.get('timeframes', {})
+    ltf_tf = timeframes.get('ltf', '15m')
+    itf_tf = timeframes.get('itf', '1h')
+    htf_tf = timeframes.get('htf', '4h')
+    
+    # Convert timeframe strings to minutes for synthetic data
+    tf_to_minutes = {
+        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '2h': 120, '4h': 240, '6h': 360,
+        '12h': 720, '1d': 1440,
+    }
+    
+    if data_source == 'synthetic':
+        # Generate synthetic candles for all timeframes
+        base_seed = config['data_generation']['seed']
+        if base_seed is not None:
+            symbol_seed = hash(symbol + str(base_seed)) % (2**31)
+        else:
+            symbol_seed = None
+        
+        ltf_minutes = tf_to_minutes.get(ltf_tf, 15)
+        itf_minutes = tf_to_minutes.get(itf_tf, 60)
+        htf_minutes = tf_to_minutes.get(htf_tf, 240)
+        
+        candles_mtf = generate_synthetic_candles_mtf(
+            symbol=symbol,
+            num_ltf_candles=config['data_generation']['num_candles'],
+            ltf_interval_minutes=ltf_minutes,
+            itf_interval_minutes=itf_minutes,
+            htf_interval_minutes=htf_minutes,
+            volatility=config['data_generation']['volatility'],
+            seed=symbol_seed
+        )
+        
+        return candles_mtf
+    
+    elif data_source == 'historical':
+        # Load historical candles for each timeframe
+        if 'historical_data' not in config:
+            raise ValueError(
+                "data_source is 'historical' but 'historical_data' section is missing in config."
+            )
+        
+        hist_config = config['historical_data']
+        exchange = hist_config.get('exchange', 'binance')
+        market_type = hist_config.get('market_type', 'futures')
+        data_dir = Path(hist_config.get('data_dir', './data'))
+        
+        # Determine date range
+        use_full_history = config.get('use_full_history', False)
+        
+        if use_full_history:
+            # Find common window across all timeframes
+            required_tfs = [ltf_tf, itf_tf, htf_tf]
+            try:
+                start_date, end_date = find_common_window(
+                    symbol=symbol,
+                    timeframes=required_tfs,
+                    data_dir=data_dir,
+                    exchange=exchange,
+                    market_type=market_type
+                )
+                
+                if not start_date or not end_date:
+                    raise HistoricalDataError(
+                        f"No common time window found for {symbol} across timeframes {required_tfs}"
+                    )
+            except HistoricalDataError as e:
+                raise HistoricalDataError(
+                    f"Failed to determine full history window for {symbol}: {e}"
+                )
+        else:
+            # Use explicit start/end dates from config
+            start_date = config.get('start_date', '2024-01-01')
+            end_date = config.get('end_date', '2024-03-31')
+        
+        # Load candles for each timeframe
+        try:
+            ltf_candles = load_historical_candles(
+                symbol=symbol,
+                timeframe=ltf_tf,
+                start_date=start_date,
+                end_date=end_date,
+                data_dir=data_dir,
+                exchange=exchange,
+                market_type=market_type,
+                return_metadata=False
+            )
+            
+            itf_candles = load_historical_candles(
+                symbol=symbol,
+                timeframe=itf_tf,
+                start_date=start_date,
+                end_date=end_date,
+                data_dir=data_dir,
+                exchange=exchange,
+                market_type=market_type,
+                return_metadata=False
+            )
+            
+            htf_candles = load_historical_candles(
+                symbol=symbol,
+                timeframe=htf_tf,
+                start_date=start_date,
+                end_date=end_date,
+                data_dir=data_dir,
+                exchange=exchange,
+                market_type=market_type,
+                return_metadata=False
+            )
+            
+            return {
+                'ltf': ltf_candles,
+                'itf': itf_candles,
+                'htf': htf_candles,
+            }
+        
+        except HistoricalDataError as e:
+            raise HistoricalDataError(
+                f"Failed to load MTF historical data for {symbol}:\n{e}\n\n"
+                f"Config settings:\n"
+                f"  - exchange: {exchange}\n"
+                f"  - market_type: {market_type}\n"
+                f"  - timeframes: LTF={ltf_tf}, ITF={itf_tf}, HTF={htf_tf}\n"
+                f"  - date_range: {start_date} to {end_date}\n"
+                f"  - data_dir: {data_dir}\n"
+            )
+    
+    else:
+        raise ValueError(
+            f"Invalid data_source: '{data_source}'. "
+            f"Must be 'synthetic' or 'historical'."
+        )
+
 
 def execute_backtest_for_symbol(
     symbol: str,
-    candles: List[Dict[str, Any]],
+    candles_by_tf: Dict[str, List[Dict[str, Any]]],
     params: SupplyDemandParameters,
     initial_capital: float
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], float, List[float], DecisionFunnel]:
-    """Execute backtest for a single symbol
+    """Execute backtest for a single symbol using multi-timeframe analysis
     
     Args:
         symbol: Trading pair symbol
-        candles: OHLC candle data
+        candles_by_tf: Dict with keys 'ltf', 'itf', 'htf' containing candle lists
         params: Strategy parameters
         initial_capital: Starting capital
     
@@ -491,15 +871,23 @@ def execute_backtest_for_symbol(
         stage_timings = {}
         stage_start = time.time()
     
-    # Detect all zones
-    zones = detect_zones_dbr_rbd(candles, params)
+    # Extract candles by timeframe
+    ltf_candles = candles_by_tf['ltf']
+    itf_candles = candles_by_tf['itf']
+    htf_candles = candles_by_tf['htf']
+    
+    # Detect zones on all timeframes
+    # LTF zones: for trade entries
+    ltf_zones = detect_zones_dbr_rbd(ltf_candles, params)
+    
+    # HTF zones: for curve location analysis
+    htf_zones = detect_zones_dbr_rbd(htf_candles, params)
     
     if enable_profiling:
         stage_timings['zone_detection'] = time.time() - stage_start
         stage_start = time.time()
     
     # OPTIMIZATION: Precompute zone freshness using vectorized operations
-    # This eliminates the need to check each zone on every candle (O(Z*C) -> O(Z+C))
     from strategies.supply_demand_v1.zone_freshness_precompute import (
         precompute_zone_freshness,
         is_zone_fresh_at_idx,
@@ -507,20 +895,28 @@ def execute_backtest_for_symbol(
         cache_zone_metrics
     )
     
-    precompute_zone_freshness(zones, candles)
-    zone_creation_index = build_zone_creation_index(zones)
-    cache_zone_metrics(zones)
+    # Precompute freshness for LTF zones (used for trade entries)
+    precompute_zone_freshness(ltf_zones, ltf_candles)
+    zone_creation_index = build_zone_creation_index(ltf_zones)
+    cache_zone_metrics(ltf_zones)
+    
+    # Precompute freshness for HTF zones (used for curve analysis)
+    precompute_zone_freshness(htf_zones, htf_candles)
     
     if enable_profiling:
         stage_timings['freshness_precompute'] = time.time() - stage_start
         stage_start = time.time()
     
-    # Initialize decision funnel tracking
+    # Initialize decision funnel tracking with MTF metrics
     funnel = DecisionFunnel(symbol=symbol)
-    funnel.zones_detected = len(zones)
-    # FIX: Count zones that are fresh at the END (is_fresh==True), not at the start
-    # This matches the zones.csv is_fresh field
-    funnel.zones_fresh = len([z for z in zones if z.is_fresh])
+    funnel.zones_detected_ltf = len(ltf_zones)
+    funnel.zones_detected_htf = len(htf_zones)
+    funnel.zones_fresh_ltf = len([z for z in ltf_zones if z.is_fresh])
+    funnel.zones_fresh_htf = len([z for z in htf_zones if z.is_fresh])
+    
+    # Legacy fields for backward compatibility
+    funnel.zones_detected = funnel.zones_detected_ltf
+    funnel.zones_fresh = funnel.zones_fresh_ltf
     
     # Track capital and positions
     capital = initial_capital
@@ -532,17 +928,47 @@ def execute_backtest_for_symbol(
     # Track equity curve for drawdown calculation
     equity_curve = [initial_capital]  # Start with initial capital
     
-    # Simulate backtest bar by bar
-    for idx in range(len(candles)):
-        candle = candles[idx]
+    # Simulate backtest bar by bar on LTF
+    for ltf_idx in range(len(ltf_candles)):
+        ltf_candle = ltf_candles[ltf_idx]
+        ltf_timestamp = ltf_candle['timestamp']
+        current_price = ltf_candle['close']
         
-        # Zone freshness is already precomputed - no per-candle checks needed!
+        # Map LTF timestamp to HTF and ITF indices
+        htf_idx = find_htf_index_at_ltf_timestamp(ltf_timestamp, htf_candles)
+        itf_idx = find_itf_index_at_ltf_timestamp(ltf_timestamp, itf_candles)
         
-        # Check for fills on pending orders
+        # Determine curve location from HTF zones (if HTF data available)
+        curve_state = CurveLocation.EQUILIBRIUM  # Default
+        if htf_idx is not None and htf_idx >= 0:
+            # Find nearest fresh HTF zones at this HTF index
+            htf_supply_above, htf_demand_below = None, None
+            for htf_zone in htf_zones:
+                if htf_zone.created_at > htf_idx:
+                    continue  # Zone not created yet
+                
+                # Check if zone is fresh at htf_idx
+                if is_zone_fresh_at_idx(htf_zone, htf_idx):
+                    if htf_zone.zone_type == ZoneType.SUPPLY and htf_zone.proximal > current_price:
+                        if htf_supply_above is None or htf_zone.proximal < htf_supply_above.proximal:
+                            htf_supply_above = htf_zone
+                    elif htf_zone.zone_type == ZoneType.DEMAND and htf_zone.proximal < current_price:
+                        if htf_demand_below is None or htf_zone.proximal > htf_demand_below.proximal:
+                            htf_demand_below = htf_zone
+            
+            # Compute curve location
+            curve_state = curve_location(current_price, htf_supply_above, htf_demand_below)
+        
+        # Determine trend direction from ITF candles (if ITF data available)
+        trend_state = TrendDirection.SIDEWAYS  # Default
+        if itf_idx is not None and itf_idx >= 100:  # Need sufficient history
+            trend_state = trend_direction_itf(itf_candles[:itf_idx+1], params)
+        
+        # Check for fills on pending orders (LTF fills only)
         for plan in list(pending_plans):
             if plan.order_state == OrderState.PENDING:
                 # Check TTL expiration first
-                if params.ttl_bars and (idx - plan.placed_at_idx) >= params.ttl_bars:
+                if params.ttl_bars and (ltf_idx - plan.placed_at_idx) >= params.ttl_bars:
                     plan.order_state = OrderState.CANCELLED
                     pending_plans.remove(plan)
                     funnel.orders_expired_ttl += 1
@@ -553,22 +979,21 @@ def execute_backtest_for_symbol(
                         if order['zone_id'] == zone_id and order['status'] == 'PLACED':
                             order['status'] = 'EXPIRED'
                             order['cancel_reason'] = 'TTL_EXPIRED'
-                            order['expiry_idx'] = idx
+                            order['expiry_idx'] = ltf_idx
                             break
                     
-                    # Note: TTL cancellation doesn't create a trade record (never filled)
                     continue
                 
                 # Check for fill
                 filled = check_limit_order_fill(
                     plan,
-                    candles,
-                    idx,
+                    ltf_candles,
+                    ltf_idx,
                     params
                 )
                 if filled:
                     plan.order_state = OrderState.FILLED
-                    plan.filled_at_idx = idx
+                    plan.filled_at_idx = ltf_idx
                     funnel.orders_filled += 1
                     
                     # Update order record with fill
@@ -576,8 +1001,8 @@ def execute_backtest_for_symbol(
                     for order in orders:
                         if order['zone_id'] == zone_id and order['status'] == 'PLACED':
                             order['status'] = 'FILLED'
-                            order['filled_idx'] = idx
-                            order['filled_time'] = candle.get('timestamp')
+                            order['filled_idx'] = ltf_idx
+                            order['filled_time'] = ltf_candle.get('timestamp')
                             order['fill_price'] = plan.actual_entry_price or plan.entry_price
                             break
                     
@@ -585,7 +1010,7 @@ def execute_backtest_for_symbol(
                     pending_plans.remove(plan)
                     open_positions.append(plan)
                     
-                    # Create trade record (entry)
+                    # Create trade record (entry) with curve and trend state
                     trades.append({
                         'symbol': symbol,
                         'side': 'LONG' if plan.zone.zone_type == ZoneType.DEMAND else 'SHORT',
@@ -595,13 +1020,14 @@ def execute_backtest_for_symbol(
                         'planned_R': plan.r_multiple,
                         'planned_r': plan.r_multiple,  # Add lowercase for integrity validation
                         'realized_R': None,  # Will be filled on exit
-                        'entry_time': candle.get('timestamp'),
-                        'entry_idx': idx,
+                        'entry_time': ltf_candle.get('timestamp'),
+                        'entry_idx': ltf_idx,
                         'exit_time': None,
                         'exit_idx': None,
                         'exit_reason': None,
                         'score': plan.score,
-                        # curve_state and trend_state removed until properly implemented
+                        'curve_state': enum_to_string(curve_state),  # Now properly tracked
+                        'trend_state': enum_to_string(trend_state),  # Now properly tracked
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
                         'position_size': plan.position_size,
@@ -614,7 +1040,7 @@ def execute_backtest_for_symbol(
             # Check for intrabar stop or target hit
             exit_reason = check_intrabar_exit(
                 plan,
-                candle,
+                ltf_candle,
                 params,
                 stop_wins_on_same_bar=True  # Conservative: stop wins if both hit
             )
@@ -626,8 +1052,7 @@ def execute_backtest_for_symbol(
                 elif exit_reason == "TARGET":
                     exit_price = plan.take_profit
                 else:
-                    # Shouldn't happen with current logic
-                    exit_price = candle['close']
+                    exit_price = ltf_candle['close']
                 
                 # Calculate P&L
                 pnl = calculate_pnl_with_costs(
@@ -649,10 +1074,10 @@ def execute_backtest_for_symbol(
                 for trade in trades:
                     if (trade['entry_idx'] == plan.filled_at_idx and 
                         trade['symbol'] == symbol and
-                        trade['exit_idx'] is None):  # Find the unfilled trade
+                        trade['exit_idx'] is None):
                         trade['realized_R'] = realized_r
-                        trade['exit_time'] = candle.get('timestamp')
-                        trade['exit_idx'] = idx
+                        trade['exit_time'] = ltf_candle.get('timestamp')
+                        trade['exit_idx'] = ltf_idx
                         trade['exit_reason'] = exit_reason
                         trade['pnl'] = pnl
                         break
@@ -668,7 +1093,7 @@ def execute_backtest_for_symbol(
                 # No exit, manage trade (update stops if needed)
                 management = manage_trade_plan(
                     plan,
-                    candle['close'],
+                    ltf_candle['close'],
                     params
                 )
                 
@@ -676,17 +1101,14 @@ def execute_backtest_for_symbol(
                 if management.get("update_stop") is not None:
                     plan.stop_loss = management["update_stop"]
         
-        # Look for new setups - only check zones that are fresh at this index
-        if idx > 100:  # Need some history for HTF/ITF analysis
-            # OPTIMIZATION: Only evaluate zones that are:
-            # 1. Created before this index
-            # 2. Fresh at this index (using precomputed first_touch_idx)
-            for zone in zones:
-                if zone.created_at >= idx:
+        # Look for new setups - only check LTF zones that are fresh at this index
+        if ltf_idx > 100:  # Need some history for analysis
+            for zone in ltf_zones:
+                if zone.created_at >= ltf_idx:
                     continue  # Zone not created yet
                 
                 # Check freshness using precomputed index (O(1) instead of O(C))
-                if not is_zone_fresh_at_idx(zone, idx):
+                if not is_zone_fresh_at_idx(zone, ltf_idx):
                     continue  # Zone already touched
                 
                 # Check if we already have a pending order or position for this zone
@@ -696,19 +1118,58 @@ def execute_backtest_for_symbol(
                 if zone_already_traded:
                     continue
                 
-                # Candidate evaluation
-                # NOTE: In simplified implementation, curve and trend filters are not applied
-                # so zones_after_curve_filter and zones_after_trend_filter remain 0
-                # This would be incremented if curve/trend gating was properly implemented
+                # Apply MTF gating BEFORE scoring (performance optimization)
+                # Convert curve and trend to string format for should_allow_trade
+                curve_str = enum_to_string(curve_state)
+                trend_str = enum_to_string(trend_state)
                 
-                # Score the zone (simplified - use placeholder curve/trend)
+                # Placeholder score for gating check (we'll compute actual score after gating)
+                base_score = 0.0
+                
+                # Check if trade should be allowed based on curve + trend gating
+                allowed, adjusted_score = should_allow_trade(
+                    zone,
+                    curve_str,
+                    trend_str,
+                    base_score,
+                    params
+                )
+                
+                if not allowed:
+                    # Track rejection reason (simplified logic)
+                    if curve_str in ["high", "low"]:
+                        # Rejected due to curve position (HIGH blocks DEMAND, LOW blocks SUPPLY)
+                        funnel.rejected_curve += 1
+                    else:
+                        # Rejected due to trend misalignment or sideways (for EQ zones)
+                        funnel.rejected_trend += 1
+                    continue
+                
+                # Passed gating - now score the zone
+                # Find opposing zone (nearest fresh zone of opposite type)
+                opposing_zone = None
+                if zone.zone_type == ZoneType.DEMAND:
+                    # Find nearest fresh supply above
+                    for z in ltf_zones:
+                        if z.zone_type == ZoneType.SUPPLY and z.proximal > current_price:
+                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
+                                if opposing_zone is None or z.proximal < opposing_zone.proximal:
+                                    opposing_zone = z
+                else:  # SUPPLY
+                    # Find nearest fresh demand below
+                    for z in ltf_zones:
+                        if z.zone_type == ZoneType.DEMAND and z.proximal < current_price:
+                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
+                                if opposing_zone is None or z.proximal > opposing_zone.proximal:
+                                    opposing_zone = z
+                
                 score = odds_enhancer_score(
                     zone,
-                    candle['close'],
-                    CurveLocation.EQUILIBRIUM,  # Simplified
-                    TrendDirection.SIDEWAYS,     # Simplified
+                    current_price,
+                    curve_state,
+                    trend_state,
                     params,
-                    None  # opposing_zone
+                    opposing_zone
                 )
                 funnel.candidates_scored += 1
                 
@@ -719,10 +1180,10 @@ def execute_backtest_for_symbol(
                 # Build trade plan
                 plan = build_trade_plan(
                     zone,
-                    candle['close'],
+                    current_price,
                     capital,
                     params,
-                    None,  # opposing_zone simplified
+                    opposing_zone,
                     score
                 )
                 
@@ -731,21 +1192,21 @@ def execute_backtest_for_symbol(
                     continue
                 
                 # Place order
-                plan.placed_at_idx = idx
+                plan.placed_at_idx = ltf_idx
                 pending_plans.append(plan)
                 funnel.orders_placed += 1
                 
-                # Create order record
+                # Create order record with curve and trend state
                 zone_id = f"{symbol}_{zone.created_at}_{zone.zone_type.value}"
                 side = 'LONG' if zone.zone_type == ZoneType.DEMAND else 'SHORT'
-                expiry_idx = idx + params.ttl_bars if params.ttl_bars else None
+                expiry_idx = ltf_idx + params.ttl_bars if params.ttl_bars else None
                 
                 orders.append({
                     'symbol': symbol,
                     'side': side,
                     'zone_id': zone_id,
-                    'placed_idx': idx,
-                    'placed_time': candle.get('timestamp'),
+                    'placed_idx': ltf_idx,
+                    'placed_time': ltf_candle.get('timestamp'),
                     'limit_price': plan.entry_price,
                     'stop': plan.stop_loss,
                     'target': plan.take_profit,
@@ -757,46 +1218,49 @@ def execute_backtest_for_symbol(
                     'filled_time': None,
                     'fill_price': None,
                     'cancel_reason': None,
+                    'curve_state': enum_to_string(curve_state),
+                    'trend_state': enum_to_string(trend_state),
                 })
     
     # Close any remaining open positions at EOD (end of data)
-    for plan in open_positions:
-        is_long = plan.zone.zone_type == ZoneType.DEMAND
-        exit_price = candles[-1]['close']
-        
-        pnl = calculate_pnl_with_costs(plan, exit_price, params)
-        
-        entry = plan.actual_entry_price or plan.entry_price
-        stop = plan.stop_loss
-        risk = abs(entry - stop)
-        if is_long:
-            realized_r = (exit_price - entry) / risk if risk > 0 else 0
-        else:
-            realized_r = (entry - exit_price) / risk if risk > 0 else 0
-        
-        # Update trade record
-        for trade in trades:
-            if (trade['entry_idx'] == plan.filled_at_idx and 
-                trade['symbol'] == symbol and
-                trade['exit_idx'] is None):
-                trade['realized_R'] = realized_r
-                trade['exit_time'] = candles[-1].get('timestamp')
-                trade['exit_idx'] = len(candles) - 1
-                trade['exit_reason'] = 'EOD_CLOSE'
-                trade['pnl'] = pnl
-                break
-        
-        capital += pnl
-        equity_curve.append(capital)
-        funnel.trades_closed += 1
+    if ltf_candles:
+        for plan in open_positions:
+            is_long = plan.zone.zone_type == ZoneType.DEMAND
+            exit_price = ltf_candles[-1]['close']
+            
+            pnl = calculate_pnl_with_costs(plan, exit_price, params)
+            
+            entry = plan.actual_entry_price or plan.entry_price
+            stop = plan.stop_loss
+            risk = abs(entry - stop)
+            if is_long:
+                realized_r = (exit_price - entry) / risk if risk > 0 else 0
+            else:
+                realized_r = (entry - exit_price) / risk if risk > 0 else 0
+            
+            # Update trade record
+            for trade in trades:
+                if (trade['entry_idx'] == plan.filled_at_idx and 
+                    trade['symbol'] == symbol and
+                    trade['exit_idx'] is None):
+                    trade['realized_R'] = realized_r
+                    trade['exit_time'] = ltf_candles[-1].get('timestamp')
+                    trade['exit_idx'] = len(ltf_candles) - 1
+                    trade['exit_reason'] = 'EOD_CLOSE'
+                    trade['pnl'] = pnl
+                    break
+            
+            capital += pnl
+            equity_curve.append(capital)
+            funnel.trades_closed += 1
     
     if enable_profiling:
         stage_timings['backtest_loop'] = time.time() - stage_start
         stage_start = time.time()
     
-    # Convert zones to dicts for output
+    # Convert zones to dicts for output (LTF zones only, as these are the entry zones)
     zone_dicts = []
-    for zone in zones:
+    for zone in ltf_zones:
         zone_dicts.append({
             'symbol': symbol,
             'zone_type': zone.zone_type.value,
@@ -853,13 +1317,14 @@ def run_symbol_backtest(
         Exception: Any error during backtest execution
     """
     try:
-        # Load candles with metadata (each worker loads its own data)
-        candles, metadata = load_candles_from_config(symbol, config, return_metadata=True)
+        # Load candles for all timeframes (HTF, ITF, LTF)
+        candles_by_tf = load_candles_mtf_from_config(symbol, config)
+        ltf_candles = candles_by_tf['ltf']
         
-        # Execute backtest
+        # Execute backtest with MTF data
         trades, zones, orders, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
             symbol,
-            candles,
+            candles_by_tf,
             params,
             initial_capital
         )
@@ -867,20 +1332,16 @@ def run_symbol_backtest(
         # Calculate max drawdown
         max_drawdown = calculate_max_drawdown(equity_curve)
         
-        # Build data provenance
+        # Build data provenance (use LTF for provenance)
         data_provenance = {
-            'first_timestamp': candles[0]['timestamp'].isoformat() if candles else None,
-            'last_timestamp': candles[-1]['timestamp'].isoformat() if candles else None,
-            'first_close': candles[0]['close'] if candles else None,
-            'last_close': candles[-1]['close'] if candles else None,
-            'candle_count': len(candles),
-            'checksum': calculate_candle_checksum(candles),
-            'available_first_ts': metadata.get('available_first_ts'),
-            'available_last_ts': metadata.get('available_last_ts'),
-            'available_count': metadata.get('available_count'),
-            'used_first_ts': metadata.get('used_first_ts'),
-            'used_last_ts': metadata.get('used_last_ts'),
-            'used_count': metadata.get('used_count'),
+            'first_timestamp': ltf_candles[0]['timestamp'].isoformat() if ltf_candles else None,
+            'last_timestamp': ltf_candles[-1]['timestamp'].isoformat() if ltf_candles else None,
+            'first_close': ltf_candles[0]['close'] if ltf_candles else None,
+            'last_close': ltf_candles[-1]['close'] if ltf_candles else None,
+            'candle_count_ltf': len(ltf_candles),
+            'candle_count_itf': len(candles_by_tf['itf']),
+            'candle_count_htf': len(candles_by_tf['htf']),
+            'checksum_ltf': calculate_candle_checksum(ltf_candles),
         }
         
         # Calculate metrics
@@ -1427,7 +1888,13 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         'is_synthetic_data': is_synthetic_data,
         'exchange': exchange,
         'market_type': market_type,
-        'candle_timeframe': params.ltf_tf,  # Primary timeframe for zone detection
+        # Multi-timeframe configuration
+        'candles_timeframes_used': {
+            'ltf': params.ltf_tf,  # Lower timeframe for zone detection and entries
+            'itf': params.itf_tf,  # Intermediate timeframe for trend analysis
+            'htf': params.htf_tf,  # Higher timeframe for curve analysis
+        },
+        'candle_timeframe': params.ltf_tf,  # Legacy field for backward compatibility
         'symbol_data_provenance': symbol_data_provenance,
     }
     
@@ -1490,7 +1957,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
                 'symbol', 'side', 'entry', 'stop', 'target',
                 'planned_R', 'planned_r', 'realized_R', 
                 'entry_time', 'entry_idx', 'exit_time', 'exit_idx',
-                'exit_reason', 'score', 'zone_created_at', 'pnl', 'position_size'
+                'exit_reason', 'score', 'curve_state', 'trend_state',
+                'zone_created_at', 'pnl', 'position_size'
             ]
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
@@ -1581,10 +2049,13 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     funnel_data = {
         'per_symbol': [asdict(f) for f in result.decision_funnels],
         'aggregate': {
-            'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
-            'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
-            'zones_after_curve_filter': sum(f.zones_after_curve_filter for f in result.decision_funnels),
-            'zones_after_trend_filter': sum(f.zones_after_trend_filter for f in result.decision_funnels),
+            # MTF-specific metrics
+            'zones_detected_ltf': sum(f.zones_detected_ltf for f in result.decision_funnels),
+            'zones_detected_htf': sum(f.zones_detected_htf for f in result.decision_funnels),
+            'zones_fresh_ltf': sum(f.zones_fresh_ltf for f in result.decision_funnels),
+            'zones_fresh_htf': sum(f.zones_fresh_htf for f in result.decision_funnels),
+            'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
+            'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
             'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
             'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
@@ -1592,6 +2063,11 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
             'trades_closed': sum(f.trades_closed for f in result.decision_funnels),
+            # Legacy fields for backward compatibility
+            'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
+            'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
+            'zones_after_curve_filter': sum(f.zones_after_curve_filter for f in result.decision_funnels),
+            'zones_after_trend_filter': sum(f.zones_after_trend_filter for f in result.decision_funnels),
         }
     }
     with open(artifacts_dir / 'decision_funnel.json', 'w') as f:
