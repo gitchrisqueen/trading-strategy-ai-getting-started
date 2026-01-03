@@ -760,9 +760,13 @@ def curve_location(
 
 def trend_direction_itf(
     candles: Any,
+    current_idx: int,
     parameters: SupplyDemandParameters
 ) -> TrendDirection:
     """Determine trend direction on ITF using pivot analysis
+    
+    OPTIMIZED: Uses bounded trailing window instead of slicing full history.
+    Only analyzes candles needed for pivot detection (pivot_len * pivots_to_consider).
     
     Analyzes pivot highs and lows to classify trend:
     - Uptrend: Higher highs and higher lows (HH/HL)
@@ -770,14 +774,30 @@ def trend_direction_itf(
     - Sideways: Mixed or equal highs/lows
     
     Args:
-        candles: ITF candle data
+        candles: ITF candle data (full list, not sliced)
+        current_idx: Current ITF candle index (analysis done up to this index)
         parameters: Strategy parameters (pivot_len, pivots_to_consider)
     
     Returns:
         TrendDirection (UP, DOWN, or SIDEWAYS)
     """
-    # Detect pivots
-    pivot_highs, pivot_lows = detect_pivot_highs_lows(candles, parameters.pivot_len)
+    # Calculate minimum window needed for trend analysis
+    # Need: pivot_len candles on each side of pivot + enough pivots to analyze
+    # Conservative estimate: pivot_len * 2 * pivots_to_consider * 2
+    min_history = parameters.pivot_len * 2 + parameters.pivots_to_consider * parameters.pivot_len * 2
+    
+    if current_idx < min_history:
+        return TrendDirection.SIDEWAYS
+    
+    # Define bounded window for pivot detection
+    # Look back only as far as needed to find pivots_to_consider pivots
+    window_start = max(0, current_idx - min_history - 100)  # Add buffer for reliability
+    window_end = current_idx + 1  # Inclusive end
+    
+    # Detect pivots only in bounded window (no slicing, use indices)
+    pivot_highs, pivot_lows = detect_pivot_highs_lows_bounded(
+        candles, window_start, window_end, parameters.pivot_len
+    )
     
     # Need at least 2 pivots of each type to determine trend
     if len(pivot_highs) < 2 or len(pivot_lows) < 2:
@@ -1549,6 +1569,67 @@ def detect_pivot_highs_lows(
     
     # Scan for pivots (cannot detect in first/last 'lookback' candles)
     for i in range(lookback, len(candles) - lookback):
+        current_high = candles[i]['high']
+        current_low = candles[i]['low']
+        
+        # Check for pivot high
+        is_pivot_high = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['high'] >= current_high or candles[i + j]['high'] >= current_high:
+                is_pivot_high = False
+                break
+        
+        if is_pivot_high:
+            pivot_highs.append(i)
+        
+        # Check for pivot low
+        is_pivot_low = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['low'] <= current_low or candles[i + j]['low'] <= current_low:
+                is_pivot_low = False
+                break
+        
+        if is_pivot_low:
+            pivot_lows.append(i)
+    
+    return pivot_highs, pivot_lows
+
+
+def detect_pivot_highs_lows_bounded(
+    candles: Any,
+    start_idx: int,
+    end_idx: int,
+    lookback: int = 5
+) -> Tuple[List[int], List[int]]:
+    """Detect pivot high and low points in bounded window (no slicing)
+    
+    OPTIMIZED version that works on bounded indices without creating slices.
+    
+    Args:
+        candles: Full OHLC candle list (not sliced)
+        start_idx: Start of window (inclusive)
+        end_idx: End of window (exclusive)
+        lookback: Number of candles to look back/forward for confirmation
+    
+    Returns:
+        Tuple of (pivot_high_indices, pivot_low_indices) - absolute indices in candles
+    """
+    pivot_highs = []
+    pivot_lows = []
+    
+    # Validate window
+    if start_idx < 0 or end_idx > len(candles) or start_idx >= end_idx:
+        return pivot_highs, pivot_lows
+    
+    # Need at least lookback*2 + 1 candles in window
+    window_size = end_idx - start_idx
+    if window_size < lookback * 2 + 1:
+        return pivot_highs, pivot_lows
+    
+    # Scan for pivots in window (cannot detect in first/last 'lookback' candles of window)
+    for i in range(start_idx + lookback, end_idx - lookback):
         current_high = candles[i]['high']
         current_low = candles[i]['low']
         

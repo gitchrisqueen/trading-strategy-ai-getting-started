@@ -177,6 +177,65 @@ def find_itf_index_at_ltf_timestamp(
     return idx
 
 
+def precompute_ltf_to_htf_itf_mapping(
+    ltf_candles: List[Dict[str, Any]],
+    itf_candles: List[Dict[str, Any]],
+    htf_candles: List[Dict[str, Any]]
+) -> Tuple[List[Optional[int]], List[Optional[int]]]:
+    """Precompute LTF-to-ITF and LTF-to-HTF timestamp mappings
+    
+    OPTIMIZATION: Instead of calling bisect on every LTF candle (O(log N) per candle),
+    precompute all mappings once using a two-pointer walk (O(L + I + H) total).
+    
+    Args:
+        ltf_candles: Lower timeframe candles (e.g., 15m)
+        itf_candles: Intermediate timeframe candles (e.g., 1h)
+        htf_candles: Higher timeframe candles (e.g., 4h)
+    
+    Returns:
+        Tuple of (ltf_to_itf_idx, ltf_to_htf_idx) where:
+        - ltf_to_itf_idx[i] = most recent ITF candle index at or before ltf_candles[i]
+        - ltf_to_htf_idx[i] = most recent HTF candle index at or before ltf_candles[i]
+        - None if no valid ITF/HTF candle found
+    
+    Complexity: O(len(ltf_candles) + len(itf_candles) + len(htf_candles))
+    """
+    ltf_to_itf_idx = []
+    ltf_to_htf_idx = []
+    
+    # Two-pointer walk for ITF mapping
+    itf_ptr = 0
+    for ltf_candle in ltf_candles:
+        ltf_ts = ltf_candle['timestamp']
+        
+        # Advance ITF pointer while next ITF candle is still <= current LTF timestamp
+        while itf_ptr + 1 < len(itf_candles) and itf_candles[itf_ptr + 1]['timestamp'] <= ltf_ts:
+            itf_ptr += 1
+        
+        # Check if current ITF candle is valid (at or before LTF timestamp)
+        if itf_ptr < len(itf_candles) and itf_candles[itf_ptr]['timestamp'] <= ltf_ts:
+            ltf_to_itf_idx.append(itf_ptr)
+        else:
+            ltf_to_itf_idx.append(None)
+    
+    # Two-pointer walk for HTF mapping
+    htf_ptr = 0
+    for ltf_candle in ltf_candles:
+        ltf_ts = ltf_candle['timestamp']
+        
+        # Advance HTF pointer while next HTF candle is still <= current LTF timestamp
+        while htf_ptr + 1 < len(htf_candles) and htf_candles[htf_ptr + 1]['timestamp'] <= ltf_ts:
+            htf_ptr += 1
+        
+        # Check if current HTF candle is valid (at or before LTF timestamp)
+        if htf_ptr < len(htf_candles) and htf_candles[htf_ptr]['timestamp'] <= ltf_ts:
+            ltf_to_htf_idx.append(htf_ptr)
+        else:
+            ltf_to_htf_idx.append(None)
+    
+    return ltf_to_itf_idx, ltf_to_htf_idx
+
+
 def calculate_max_drawdown(equity_curve: List[float]) -> float:
     """Calculate maximum drawdown from an equity curve
     
@@ -862,9 +921,10 @@ def execute_backtest_for_symbol(
     Returns:
         Tuple of (trades, zones, orders, final_capital, equity_curve, decision_funnel)
     """
-    # Optional profiling support
+    # Optional profiling/benchmarking support
     import os
-    enable_profiling = os.environ.get('SDV1_PROFILE') == '1'
+    enable_profiling = os.environ.get('SDV1_PROFILE') == '1' or os.environ.get('SDV1_BENCH') == '1'
+    enable_bench = os.environ.get('SDV1_BENCH') == '1'
     
     if enable_profiling:
         import time
@@ -907,6 +967,38 @@ def execute_backtest_for_symbol(
         stage_timings['freshness_precompute'] = time.time() - stage_start
         stage_start = time.time()
     
+    # OPTIMIZATION: Precompute timestamp mappings once (Phase 1)
+    ltf_to_itf_idx, ltf_to_htf_idx = precompute_ltf_to_htf_itf_mapping(
+        ltf_candles, itf_candles, htf_candles
+    )
+    
+    if enable_profiling:
+        stage_timings['mtf_map_build'] = time.time() - stage_start
+        stage_start = time.time()
+    
+    # OPTIMIZATION: Build HTF zone sorted structures for efficient curve lookup (Phase 3)
+    # Group zones by creation index for incremental updates
+    htf_supply_zones_sorted = []  # List of (proximal, zone) sorted by proximal ascending
+    htf_demand_zones_sorted = []  # List of (proximal, zone) sorted by proximal descending
+    
+    for zone in htf_zones:
+        if zone.zone_type == ZoneType.SUPPLY:
+            htf_supply_zones_sorted.append((zone.proximal, zone))
+        else:  # DEMAND
+            htf_demand_zones_sorted.append((zone.proximal, zone))
+    
+    # Sort supply by proximal (ascending - lowest proximal first)
+    htf_supply_zones_sorted.sort(key=lambda x: x[0])
+    # Sort demand by proximal (descending - highest proximal first)
+    htf_demand_zones_sorted.sort(key=lambda x: x[0], reverse=True)
+    
+    # Cache curve state per HTF index to avoid recomputation
+    htf_curve_cache = {}  # htf_idx -> (curve_state, htf_supply_above, htf_demand_below)
+    
+    if enable_profiling:
+        stage_timings['htf_curve_prep'] = time.time() - stage_start
+        stage_start = time.time()
+    
     # Initialize decision funnel tracking with MTF metrics
     funnel = DecisionFunnel(symbol=symbol)
     funnel.zones_detected_ltf = len(ltf_zones)
@@ -933,41 +1025,72 @@ def execute_backtest_for_symbol(
     # Track equity curve for drawdown calculation
     equity_curve = [initial_capital]  # Start with initial capital
     
+    # OPTIMIZATION: Build active zone manager (Phase 4)
+    # Pre-bucket zones by created_at for O(1) zone activation
+    ltf_zones_by_creation = {}
+    for zone in ltf_zones:
+        if zone.created_at not in ltf_zones_by_creation:
+            ltf_zones_by_creation[zone.created_at] = []
+        ltf_zones_by_creation[zone.created_at].append(zone)
+    
+    # Track active zones (created but still fresh)
+    active_zones = set()  # Zones that are created and fresh at current index
+    
     # Simulate backtest bar by bar on LTF
     for ltf_idx in range(len(ltf_candles)):
         ltf_candle = ltf_candles[ltf_idx]
         ltf_timestamp = ltf_candle['timestamp']
         current_price = ltf_candle['close']
         
-        # Map LTF timestamp to HTF and ITF indices
-        htf_idx = find_htf_index_at_ltf_timestamp(ltf_timestamp, htf_candles)
-        itf_idx = find_itf_index_at_ltf_timestamp(ltf_timestamp, itf_candles)
+        # OPTIMIZATION: Use precomputed O(1) mapping instead of O(log N) bisect
+        htf_idx = ltf_to_htf_idx[ltf_idx]
+        itf_idx = ltf_to_itf_idx[ltf_idx]
         
         # Determine curve location from HTF zones (if HTF data available)
         curve_state = CurveLocation.EQUILIBRIUM  # Default
         if htf_idx is not None and htf_idx >= 0:
-            # Find nearest fresh HTF zones at this HTF index
-            htf_supply_above, htf_demand_below = None, None
-            for htf_zone in htf_zones:
-                if htf_zone.created_at > htf_idx:
-                    continue  # Zone not created yet
+            # OPTIMIZATION: Check cache first (Phase 3)
+            if htf_idx in htf_curve_cache:
+                curve_state, htf_supply_above, htf_demand_below = htf_curve_cache[htf_idx]
+            else:
+                # Find nearest fresh HTF zones using binary search on sorted lists
+                htf_supply_above, htf_demand_below = None, None
                 
-                # Check if zone is fresh at htf_idx
-                if is_zone_fresh_at_idx(htf_zone, htf_idx):
-                    if htf_zone.zone_type == ZoneType.SUPPLY and htf_zone.proximal > current_price:
-                        if htf_supply_above is None or htf_zone.proximal < htf_supply_above.proximal:
-                            htf_supply_above = htf_zone
-                    elif htf_zone.zone_type == ZoneType.DEMAND and htf_zone.proximal < current_price:
-                        if htf_demand_below is None or htf_zone.proximal > htf_demand_below.proximal:
-                            htf_demand_below = htf_zone
-            
-            # Compute curve location
-            curve_state = curve_location(current_price, htf_supply_above, htf_demand_below)
+                # Binary search for nearest supply above current price
+                # Search in sorted supply zones (ascending proximal)
+                for prox, zone in htf_supply_zones_sorted:
+                    if zone.created_at > htf_idx:
+                        continue  # Zone not created yet
+                    if not is_zone_fresh_at_idx(zone, htf_idx):
+                        continue  # Zone not fresh
+                    if prox > current_price:
+                        # First zone above price (lowest proximal > price)
+                        htf_supply_above = zone
+                        break
+                
+                # Binary search for nearest demand below current price
+                # Search in sorted demand zones (descending proximal)
+                for prox, zone in htf_demand_zones_sorted:
+                    if zone.created_at > htf_idx:
+                        continue  # Zone not created yet
+                    if not is_zone_fresh_at_idx(zone, htf_idx):
+                        continue  # Zone not fresh
+                    if prox < current_price:
+                        # First zone below price (highest proximal < price)
+                        htf_demand_below = zone
+                        break
+                
+                # Compute curve location
+                curve_state = curve_location(current_price, htf_supply_above, htf_demand_below)
+                
+                # Cache result for this HTF index
+                htf_curve_cache[htf_idx] = (curve_state, htf_supply_above, htf_demand_below)
         
         # Determine trend direction from ITF candles (if ITF data available)
         trend_state = TrendDirection.SIDEWAYS  # Default
         if itf_idx is not None and itf_idx >= 100:  # Need sufficient history
-            trend_state = trend_direction_itf(itf_candles[:itf_idx+1], params)
+            # OPTIMIZATION: Use new API that doesn't slice (Phase 2)
+            trend_state = trend_direction_itf(itf_candles, itf_idx, params)
         
         # Check for fills on pending orders (LTF fills only)
         for plan in list(pending_plans):
@@ -1106,15 +1229,24 @@ def execute_backtest_for_symbol(
                 if management.get("update_stop") is not None:
                     plan.stop_loss = management["update_stop"]
         
-        # Look for new setups - only check LTF zones that are fresh at this index
+        # OPTIMIZATION: Update active zones at this index (Phase 4)
+        # Add newly created zones
+        if ltf_idx in ltf_zones_by_creation:
+            for zone in ltf_zones_by_creation[ltf_idx]:
+                active_zones.add(zone)
+        
+        # Remove zones that just became non-fresh
+        zones_to_remove = []
+        for zone in active_zones:
+            if not is_zone_fresh_at_idx(zone, ltf_idx):
+                zones_to_remove.append(zone)
+        for zone in zones_to_remove:
+            active_zones.discard(zone)
+        
+        # Look for new setups - only check ACTIVE zones (Phase 4 + Phase 5)
         if ltf_idx > 100:  # Need some history for analysis
-            for zone in ltf_zones:
-                if zone.created_at >= ltf_idx:
-                    continue  # Zone not created yet
-                
-                # Check freshness using precomputed index (O(1) instead of O(C))
-                if not is_zone_fresh_at_idx(zone, ltf_idx):
-                    continue  # Zone already touched
+            for zone in active_zones:
+                # Zone is guaranteed to be created and fresh (by active_zones set)
                 
                 # Check if we already have a pending order or position for this zone
                 zone_already_traded = any(
@@ -1293,13 +1425,29 @@ def execute_backtest_for_symbol(
         
         # Print profiling results
         print("\n" + "=" * 80)
-        print(f"PROFILING RESULTS - {symbol}")
+        if enable_bench:
+            print(f"BENCHMARK RESULTS - {symbol}")
+        else:
+            print(f"PROFILING RESULTS - {symbol}")
         print("=" * 80)
         total_time = sum(stage_timings.values())
         for stage, timing in stage_timings.items():
             pct = (timing / total_time * 100) if total_time > 0 else 0
             print(f"{stage:25s}: {timing:7.3f}s ({pct:5.1f}%)")
         print(f"{'TOTAL':25s}: {total_time:7.3f}s")
+        
+        # Additional benchmarking stats
+        if enable_bench:
+            print("\n" + "OPTIMIZATION METRICS")
+            print(f"{'LTF Candles':25s}: {len(ltf_candles)}")
+            print(f"{'LTF Zones Detected':25s}: {len(ltf_zones)}")
+            print(f"{'HTF Zones Detected':25s}: {len(htf_zones)}")
+            print(f"{'Candidates Scored':25s}: {funnel.candidates_scored}")
+            print(f"{'Orders Placed':25s}: {funnel.orders_placed}")
+            print(f"{'Orders Filled':25s}: {funnel.orders_filled}")
+            scoring_rate = funnel.candidates_scored / len(ltf_candles) if ltf_candles else 0
+            print(f"{'Candidates/Candle Ratio':25s}: {scoring_rate:.4f}")
+        
         print("=" * 80 + "\n")
     
     return trades, zone_dicts, orders, capital, equity_curve, funnel
