@@ -170,6 +170,30 @@ def check_metrics_consistency(
 
 
 @dataclass
+class OrderRecord:
+    """Record of an order's complete lifecycle
+    
+    Tracks an order from placement through fill/expiry/cancellation
+    """
+    symbol: str
+    side: str  # "LONG" or "SHORT"
+    zone_id: str  # Unique identifier for the zone (symbol + created_at + type)
+    placed_idx: int
+    placed_time: Any  # timestamp
+    limit_price: float  # entry price
+    stop: float
+    target: float
+    planned_r: float
+    ttl_bars: Optional[int]
+    expiry_idx: Optional[int]
+    status: str  # "PLACED", "FILLED", "EXPIRED", "CANCELLED"
+    filled_idx: Optional[int] = None
+    filled_time: Any = None
+    fill_price: Optional[float] = None
+    cancel_reason: Optional[str] = None
+
+
+@dataclass
 class DecisionFunnel:
     """Decision funnel metrics for tracking why trades were/weren't taken"""
     symbol: str
@@ -184,12 +208,6 @@ class DecisionFunnel:
     orders_filled: int = 0
     orders_expired_ttl: int = 0
     trades_closed: int = 0
-    # Legacy aliases for backward compatibility
-    candidates_evaluated: int = 0  # Deprecated: use candidates_scored
-    rejected_curve: int = 0  # Deprecated: tracked separately now
-    rejected_trend: int = 0  # Deprecated: tracked separately now
-    rejected_min_score: int = 0  # Deprecated: use rejected_min_setup_score
-    rejected_min_rr: int = 0  # Deprecated: use rejected_min_reward_risk
 
 
 @dataclass
@@ -221,6 +239,7 @@ class ExperimentResult:
     symbol_results: List[SymbolResult]
     all_trades: List[Dict[str, Any]]
     all_zones: List[Dict[str, Any]]
+    all_orders: List[Dict[str, Any]]  # All orders with complete lifecycle
     aggregate_metrics: Dict[str, Any]
     integrity_report: IntegrityReport
     run_manifest: Dict[str, Any]
@@ -451,7 +470,7 @@ def execute_backtest_for_symbol(
     candles: List[Dict[str, Any]],
     params: SupplyDemandParameters,
     initial_capital: float
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, List[float], DecisionFunnel]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], float, List[float], DecisionFunnel]:
     """Execute backtest for a single symbol
     
     Args:
@@ -461,7 +480,7 @@ def execute_backtest_for_symbol(
         initial_capital: Starting capital
     
     Returns:
-        Tuple of (trades, zones, final_capital, equity_curve, decision_funnel)
+        Tuple of (trades, zones, orders, final_capital, equity_curve, decision_funnel)
     """
     # Optional profiling support
     import os
@@ -499,12 +518,14 @@ def execute_backtest_for_symbol(
     # Initialize decision funnel tracking
     funnel = DecisionFunnel(symbol=symbol)
     funnel.zones_detected = len(zones)
-    # Count zones that are fresh at the start (index 0)
-    funnel.zones_fresh = len([z for z in zones if z.first_touch_idx is None or z.first_touch_idx > 0])
+    # FIX: Count zones that are fresh at the END (is_fresh==True), not at the start
+    # This matches the zones.csv is_fresh field
+    funnel.zones_fresh = len([z for z in zones if z.is_fresh])
     
     # Track capital and positions
     capital = initial_capital
     trades = []
+    orders = []  # Track all order lifecycle events
     pending_plans = []  # Plans with pending orders
     open_positions = []  # Plans with filled orders (active positions)
     
@@ -525,6 +546,16 @@ def execute_backtest_for_symbol(
                     plan.order_state = OrderState.CANCELLED
                     pending_plans.remove(plan)
                     funnel.orders_expired_ttl += 1
+                    
+                    # Update order record with expiry
+                    zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
+                    for order in orders:
+                        if order['zone_id'] == zone_id and order['status'] == 'PLACED':
+                            order['status'] = 'EXPIRED'
+                            order['cancel_reason'] = 'TTL_EXPIRED'
+                            order['expiry_idx'] = idx
+                            break
+                    
                     # Note: TTL cancellation doesn't create a trade record (never filled)
                     continue
                 
@@ -539,6 +570,16 @@ def execute_backtest_for_symbol(
                     plan.order_state = OrderState.FILLED
                     plan.filled_at_idx = idx
                     funnel.orders_filled += 1
+                    
+                    # Update order record with fill
+                    zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
+                    for order in orders:
+                        if order['zone_id'] == zone_id and order['status'] == 'PLACED':
+                            order['status'] = 'FILLED'
+                            order['filled_idx'] = idx
+                            order['filled_time'] = candle.get('timestamp')
+                            order['fill_price'] = plan.actual_entry_price or plan.entry_price
+                            break
                     
                     # Move from pending to open positions
                     pending_plans.remove(plan)
@@ -693,6 +734,30 @@ def execute_backtest_for_symbol(
                 plan.placed_at_idx = idx
                 pending_plans.append(plan)
                 funnel.orders_placed += 1
+                
+                # Create order record
+                zone_id = f"{symbol}_{zone.created_at}_{zone.zone_type.value}"
+                side = 'LONG' if zone.zone_type == ZoneType.DEMAND else 'SHORT'
+                expiry_idx = idx + params.ttl_bars if params.ttl_bars else None
+                
+                orders.append({
+                    'symbol': symbol,
+                    'side': side,
+                    'zone_id': zone_id,
+                    'placed_idx': idx,
+                    'placed_time': candle.get('timestamp'),
+                    'limit_price': plan.entry_price,
+                    'stop': plan.stop_loss,
+                    'target': plan.take_profit,
+                    'planned_r': plan.r_multiple,
+                    'ttl_bars': params.ttl_bars,
+                    'expiry_idx': expiry_idx,
+                    'status': 'PLACED',
+                    'filled_idx': None,
+                    'filled_time': None,
+                    'fill_price': None,
+                    'cancel_reason': None,
+                })
     
     # Close any remaining open positions at EOD (end of data)
     for plan in open_positions:
@@ -759,7 +824,7 @@ def execute_backtest_for_symbol(
         print(f"{'TOTAL':25s}: {total_time:7.3f}s")
         print("=" * 80 + "\n")
     
-    return trades, zone_dicts, capital, equity_curve, funnel
+    return trades, zone_dicts, orders, capital, equity_curve, funnel
 
 
 def run_symbol_backtest(
@@ -792,7 +857,7 @@ def run_symbol_backtest(
         candles, metadata = load_candles_from_config(symbol, config, return_metadata=True)
         
         # Execute backtest
-        trades, zones, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
+        trades, zones, orders, final_capital, equity_curve, funnel = execute_backtest_for_symbol(
             symbol,
             candles,
             params,
@@ -841,10 +906,11 @@ def run_symbol_backtest(
             decision_funnel=funnel,
         )
         
-        # Store trades and zones on the result for later aggregation
+        # Store trades, zones, and orders on the result for later aggregation
         # We need to attach them as attributes for collection
         symbol_result.trades = trades
         symbol_result.zones = zones
+        symbol_result.orders = orders
         
         return symbol_result
         
@@ -873,6 +939,7 @@ def run_symbol_backtest(
         )
         error_result.trades = []
         error_result.zones = []
+        error_result.orders = []
         error_result.error = str(e)
         return error_result
 
@@ -1155,9 +1222,10 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
     # Aggregate results (sort by symbol for determinism)
     symbol_results.sort(key=lambda r: r.symbol)
     
-    # Extract trades and zones from results
+    # Extract trades, zones, and orders from results
     all_trades = []
     all_zones = []
+    all_orders = []
     decision_funnels = []
     
     # Collect window metadata for reporting
@@ -1165,11 +1233,13 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
     used_window_global_end = None
     
     for result in symbol_results:
-        # Extract trades and zones (attached by run_symbol_backtest)
+        # Extract trades, zones, and orders (attached by run_symbol_backtest)
         if hasattr(result, 'trades'):
             all_trades.extend(result.trades)
         if hasattr(result, 'zones'):
             all_zones.extend(result.zones)
+        if hasattr(result, 'orders'):
+            all_orders.extend(result.orders)
         
         decision_funnels.append(result.decision_funnel)
         
@@ -1183,12 +1253,15 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
             if not used_window_global_end or used_ts < used_window_global_end:
                 used_window_global_end = used_ts
     
-    # Sort trades and zones for determinism
+    # Sort trades, zones, and orders for determinism
     # Sort trades by (symbol, entry_idx)
     all_trades.sort(key=lambda t: (t['symbol'], t.get('entry_idx', 0)))
     
     # Sort zones by (symbol, created_at)
     all_zones.sort(key=lambda z: (z['symbol'], z.get('created_at', 0)))
+    
+    # Sort orders by (symbol, placed_idx)
+    all_orders.sort(key=lambda o: (o['symbol'], o.get('placed_idx', 0)))
     
     # Guard-rail: Validate that multi-symbol runs have different data per symbol
     if len(config['symbols']) >= 2:
@@ -1367,6 +1440,7 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         symbol_results=symbol_results,
         all_trades=all_trades,
         all_zones=all_zones,
+        all_orders=all_orders,
         aggregate_metrics=aggregate_metrics,
         integrity_report=integrity_report,
         run_manifest=run_manifest,
@@ -1439,6 +1513,29 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
     
+    # Write orders.csv (always create file, even if empty)
+    orders_file = artifacts_dir / 'orders.csv'
+    with open(orders_file, 'w', newline='') as f:
+        if result.all_orders:
+            # Get all possible fieldnames
+            fieldnames = set()
+            for order in result.all_orders:
+                fieldnames.update(order.keys())
+            fieldnames = sorted(fieldnames)
+            
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(result.all_orders)
+        else:
+            # Write header only with expected columns
+            expected_columns = [
+                'symbol', 'side', 'zone_id', 'placed_idx', 'placed_time',
+                'limit_price', 'stop', 'target', 'planned_r', 'ttl_bars', 'expiry_idx',
+                'status', 'filled_idx', 'filled_time', 'fill_price', 'cancel_reason'
+            ]
+            writer = csv.DictWriter(f, fieldnames=expected_columns)
+            writer.writeheader()
+    
     # Write run_manifest.json
     with open(artifacts_dir / 'run_manifest.json', 'w') as f:
         json.dump(result.run_manifest, f, indent=2)
@@ -1500,6 +1597,24 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     with open(artifacts_dir / 'decision_funnel.json', 'w') as f:
         json.dump(funnel_data, f, indent=2)
     
+    # Console debug summary: Orders and trades per symbol
+    print("\n" + "=" * 80)
+    print("ORDERS & TRADES DEBUG SUMMARY (Per Symbol)")
+    print("=" * 80)
+    for sr in result.symbol_results:
+        symbol_orders = [o for o in result.all_orders if o['symbol'] == sr.symbol]
+        symbol_trades = [t for t in result.all_trades if t['symbol'] == sr.symbol]
+        
+        orders_placed = len(symbol_orders)
+        orders_filled = len([o for o in symbol_orders if o['status'] == 'FILLED'])
+        orders_expired = len([o for o in symbol_orders if o['status'] == 'EXPIRED'])
+        trades_filled = len([t for t in symbol_trades if t['realized_R'] is not None])
+        trades_closed = trades_filled  # All filled trades are closed
+        
+        print(f"{sr.symbol:10s} | orders: {orders_placed:2d} placed, {orders_filled:2d} filled, {orders_expired:2d} expired | "
+              f"trades: {trades_filled:2d} filled, {trades_closed:2d} closed")
+    print("=" * 80)
+    
     # Print per-symbol compact decision funnel table
     print("\n" + "=" * 80)
     print("DECISION FUNNEL (Per Symbol)")
@@ -1539,6 +1654,7 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     print(f"  - summary.json ({len(result.symbol_results)} symbols)")
     print(f"  - trades.csv ({len(result.all_trades)} trades)")
     print(f"  - zones.csv ({len(result.all_zones)} zones)")
+    print(f"  - orders.csv ({len(result.all_orders)} orders)")
     print(f"  - run_manifest.json")
     print(f"  - violations.json ({len(result.integrity_report.violations)} violations)")
     print(f"  - metrics_warnings.json ({len(result.metrics_warnings)} warnings)")
