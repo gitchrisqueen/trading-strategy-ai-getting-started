@@ -1028,20 +1028,30 @@ def create_artifacts_folder() -> Path:
     return artifacts_dir
 
 
-def run_backtest_experiment(config_path: str) -> ExperimentResult:
+def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = None) -> ExperimentResult:
     """Run a complete backtest experiment and generate artifacts
     
     Main entry point for running experiments. Loads config, executes backtests
     across all symbols, validates integrity, and writes artifacts.
     
     Args:
-        config_path: Path to YAML configuration file
+        config_path: Path to YAML configuration file (optional if config provided)
+        config: Configuration dictionary (optional if config_path provided)
     
     Returns:
         ExperimentResult with all data and artifacts
     """
     # Load configuration
-    config = load_config(config_path)
+    if config is None and config_path is None:
+        raise ValueError("Either config_path or config must be provided")
+    
+    if config is None:
+        config = load_config(config_path)
+    
+    # Store the config path for manifest (if provided)
+    if config_path is None:
+        config_path = config.get('_config_path', 'in-memory-config')
+    
     
     # Log if this is a futures config (optional validation)
     config_name = config.get('name', Path(config_path).stem)

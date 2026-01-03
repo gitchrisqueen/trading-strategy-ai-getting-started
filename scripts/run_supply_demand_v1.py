@@ -130,7 +130,7 @@ Output files:
     try:
         # Run experiment
         print("Running backtest experiment...")
-        result = run_backtest_experiment(str(config_path))
+        result = run_backtest_experiment(config_path=str(config_path), config=config)
         
         # Create artifacts folder
         artifacts_dir = create_artifacts_folder()
