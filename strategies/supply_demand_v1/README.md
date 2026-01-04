@@ -866,6 +866,29 @@ For each trade:
 4. **Zone subjectivity**: Base identification can vary slightly in edge cases
 5. **Slippage sensitive**: Tight stops can lead to premature exit in volatile markets
 
+## Execution Paths (Compatibility Layer)
+
+The Supply & Demand V1 strategy supports **two execution paths**:
+
+### 1. CSV Backtest Adapter (Default)
+- **Purpose**: Experiments, artifacts, PR comparisons
+- **Entry point**: `scripts/run_supply_demand_v1.py`
+- **Requirements**: No external dependencies (beyond Python packages)
+- **Outputs**: Machine-readable artifacts (summary.json, trades.csv, zones.csv, etc.)
+- **Use when**: Running experiments, comparing PRs, debugging strategy logic
+
+### 2. Upstream Adapter (Optional)
+- **Purpose**: Integration with TradingStrategy.ai framework
+- **Entry point**: `decide_trades_adapter.py` (for use with `run_backtest_inline()`)
+- **Requirements**: `trade-executor` package must be installed
+- **Outputs**: Framework state objects (Portfolio, TradeExecution, etc.)
+- **Use when**: Integrating with upstream tools, production trading (future)
+- **Status**: ⚠️ Stub implementation (raises NotImplementedError)
+
+**For detailed comparison and setup instructions, see [UPSTREAM_COMPATIBILITY.md](./UPSTREAM_COMPATIBILITY.md).**
+
+---
+
 ## How to Run Experiments
 
 The strategy includes a dedicated experiment runner for repeatable backtests across multiple symbols and time ranges. This generates machine-readable artifacts for comparing runs between PRs.
