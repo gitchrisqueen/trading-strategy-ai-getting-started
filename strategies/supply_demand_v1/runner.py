@@ -59,6 +59,8 @@ from strategies.supply_demand_v1.strategy import (
     check_intrabar_exit,
     manage_trade_plan,
     calculate_pnl_with_costs,
+    check_polarity_flip,
+    get_zone_polarity_at_idx,
 )
 
 from strategies.supply_demand_v1.integrity import (
@@ -95,6 +97,30 @@ def enum_to_string(enum_value: Any) -> str:
     if hasattr(enum_value, 'value'):
         return enum_value.value
     return str(enum_value)
+
+
+def make_zone_id(symbol: str, zone: Zone) -> str:
+    """Create a stable, unique identifier for a zone
+    
+    Uses immutable fields that define a zone uniquely:
+    - symbol: Trading pair
+    - created_at: Index where zone was created
+    - zone_type: SUPPLY or DEMAND
+    - proximal: Entry reference price
+    - distal: Stop reference price
+    
+    Args:
+        symbol: Trading pair symbol
+        zone: Zone object
+    
+    Returns:
+        Unique string identifier for the zone
+    
+    Example:
+        "BTCUSDT_1234_demand_100.5_99.0"
+    """
+    zone_type_str = zone.zone_type.value if hasattr(zone.zone_type, 'value') else str(zone.zone_type)
+    return f"{symbol}_{zone.created_at}_{zone_type_str}_{zone.proximal}_{zone.distal}"
 
 
 # ============================================================================
@@ -358,8 +384,9 @@ class DecisionFunnel:
     symbol: str
     zones_detected_ltf: int = 0  # LTF zones detected
     zones_detected_htf: int = 0  # HTF zones detected
-    zones_fresh_ltf: int = 0     # LTF zones that are fresh
-    zones_fresh_htf: int = 0     # HTF zones that are fresh
+    zones_fresh_ltf: int = 0     # LTF zones that are fresh at START of simulation
+    zones_fresh_htf: int = 0     # HTF zones that are fresh at START of simulation
+    zones_fresh_final: int = 0   # LTF zones that are fresh at END of simulation
     rejected_curve: int = 0      # Rejected by curve gating
     rejected_trend: int = 0      # Rejected by trend gating
     candidates_scored: int = 0   # Candidates that passed gating and were scored
@@ -369,6 +396,11 @@ class DecisionFunnel:
     orders_filled: int = 0
     orders_expired_ttl: int = 0
     trades_closed: int = 0
+    
+    # Polarity flip metrics
+    total_flips: int = 0
+    flips_supply_to_demand: int = 0
+    flips_demand_to_supply: int = 0
     
     # Legacy fields for backward compatibility (deprecated)
     zones_detected: int = 0
@@ -1027,20 +1059,61 @@ def execute_backtest_for_symbol(
     
     # OPTIMIZATION: Build active zone manager (Phase 4)
     # Pre-bucket zones by created_at for O(1) zone activation
+    # Store tuples of (zone_id, zone) for stable identification
     ltf_zones_by_creation = {}
     for zone in ltf_zones:
+        zone_id = make_zone_id(symbol, zone)
         if zone.created_at not in ltf_zones_by_creation:
             ltf_zones_by_creation[zone.created_at] = []
-        ltf_zones_by_creation[zone.created_at].append(zone)
+        ltf_zones_by_creation[zone.created_at].append((zone_id, zone))
     
-    # Track active zones (created but still fresh)
-    active_zones = set()  # Zones that are created and fresh at current index
+    # Track active zones (created but still fresh) using Dict[zone_id, zone]
+    # This avoids hashability issues with mutable Zone dataclass objects
+    active_zones: Dict[str, Zone] = {}
+    
+    # PERFORMANCE: Flip boundary index for O(log Z) polarity flip checks
+    # Maintain sorted list of (distal, zone_id) for active zones
+    # Only check zones where distal is between prev_close and current_close
+    flip_boundary_index = []  # List of (distal, zone_id) tuples, kept sorted
+    zone_id_to_distal = {}  # For efficient removal: zone_id -> distal
+    
+    # Track activation metrics (for debugging and validation)
+    total_activations = 0
+    max_active_zones = 0
+    active_zones_sum = 0  # For calculating average
+    active_zones_samples = 0
+    
+    # Track polarity flip metrics
+    total_flips = 0
+    flips_supply_to_demand = 0
+    flips_demand_to_supply = 0
+    
+    # Track flip check efficiency
+    flip_checks_total = 0
+    flip_checks_samples = 0
+    
+    # ORDER DEDUPLICATION: Track active orders and order history per zone
+    # active_orders_by_zone: Dict[(zone_id, side), order_info]
+    # Prevents placing multiple orders for same zone at same time
+    active_orders_by_zone: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    
+    # order_history_by_zone: Dict[zone_id, List[order_attempt]]
+    # Tracks all order attempts for max_retries enforcement
+    order_history_by_zone: Dict[str, List[Dict[str, Any]]] = {}
+    
+    # zone_price_rearm_state: Dict[zone_id, Dict]
+    # Tracks if zone needs price reset before re-arming
+    zone_price_rearm_state: Dict[str, Dict[str, Any]] = {}
+    
+    # Track previous close for polarity flip detection
+    prev_close = None
     
     # Simulate backtest bar by bar on LTF
     for ltf_idx in range(len(ltf_candles)):
         ltf_candle = ltf_candles[ltf_idx]
         ltf_timestamp = ltf_candle['timestamp']
         current_price = ltf_candle['close']
+        current_close = current_price
         
         # OPTIMIZATION: Use precomputed O(1) mapping instead of O(log N) bisect
         htf_idx = ltf_to_htf_idx[ltf_idx]
@@ -1101,6 +1174,21 @@ def execute_backtest_for_symbol(
                     pending_plans.remove(plan)
                     funnel.orders_expired_ttl += 1
                     
+                    # ORDER DEDUPLICATION: Remove from active_orders_by_zone and set price reset flag
+                    plan_zone_id = make_zone_id(symbol, plan.zone)
+                    expiry_polarity = get_zone_polarity_at_idx(plan.zone, plan.placed_at_idx)
+                    side_expiry = 'LONG' if expiry_polarity == ZoneType.DEMAND else 'SHORT'
+                    order_key_expiry = (plan_zone_id, side_expiry)
+                    if order_key_expiry in active_orders_by_zone:
+                        del active_orders_by_zone[order_key_expiry]
+                    
+                    # Set price reset requirement if configured
+                    if params.rearm_requires_price_reset:
+                        zone_price_rearm_state[plan_zone_id] = {
+                            'needs_reset': True,
+                            'last_expiry_idx': ltf_idx,
+                        }
+                    
                     # Update order record with expiry
                     zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
                     for order in orders:
@@ -1124,6 +1212,14 @@ def execute_backtest_for_symbol(
                     plan.filled_at_idx = ltf_idx
                     funnel.orders_filled += 1
                     
+                    # ORDER DEDUPLICATION: Remove from active_orders_by_zone (order is filled)
+                    plan_zone_id = make_zone_id(symbol, plan.zone)
+                    entry_polarity_fill = get_zone_polarity_at_idx(plan.zone, ltf_idx)
+                    side_fill = 'LONG' if entry_polarity_fill == ZoneType.DEMAND else 'SHORT'
+                    order_key_fill = (plan_zone_id, side_fill)
+                    if order_key_fill in active_orders_by_zone:
+                        del active_orders_by_zone[order_key_fill]
+                    
                     # Update order record with fill
                     zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
                     for order in orders:
@@ -1139,9 +1235,11 @@ def execute_backtest_for_symbol(
                     open_positions.append(plan)
                     
                     # Create trade record (entry) with curve and trend state
+                    # Use polarity at entry time for trade side determination
+                    entry_polarity = get_zone_polarity_at_idx(plan.zone, ltf_idx)
                     trades.append({
                         'symbol': symbol,
-                        'side': 'LONG' if plan.zone.zone_type == ZoneType.DEMAND else 'SHORT',
+                        'side': 'LONG' if entry_polarity == ZoneType.DEMAND else 'SHORT',
                         'entry': plan.actual_entry_price or plan.entry_price,
                         'stop': plan.stop_loss,
                         'target': plan.take_profit,
@@ -1159,11 +1257,18 @@ def execute_backtest_for_symbol(
                         'zone_created_at': plan.zone.created_at,
                         'pnl': 0.0,
                         'position_size': plan.position_size,
+                        # Polarity tracking
+                        'polarity_type_at_entry': enum_to_string(entry_polarity),
+                        'flip_count_at_entry': plan.zone.flip_count,
                     })
         
         # Check for exits on open positions
         for plan in list(open_positions):
-            is_long = plan.zone.zone_type == ZoneType.DEMAND
+            # Use polarity at entry (stored in plan) for position direction
+            # Get polarity from the corresponding trade record
+            plan_entry_idx = plan.filled_at_idx
+            entry_polarity = get_zone_polarity_at_idx(plan.zone, plan_entry_idx) if plan_entry_idx is not None else plan.zone.zone_type
+            is_long = entry_polarity == ZoneType.DEMAND
             
             # Check for intrabar stop or target hit
             exit_reason = check_intrabar_exit(
@@ -1182,21 +1287,52 @@ def execute_backtest_for_symbol(
                 else:
                     exit_price = ltf_candle['close']
                 
-                # Calculate P&L
+                # Calculate P&L (includes all costs)
                 pnl = calculate_pnl_with_costs(
                     plan,
                     exit_price,
                     params
                 )
                 
-                # Calculate realized R
+                # Calculate realized_R based on exit reason
+                # Use actual_entry_price (which includes entry costs) for R calculation
                 entry = plan.actual_entry_price or plan.entry_price
                 stop = plan.stop_loss
                 risk = abs(entry - stop)
-                if is_long:
-                    realized_r = (exit_price - entry) / risk if risk > 0 else 0
+                
+                if exit_reason == "STOP":
+                    # Stop loss hit: realized_R should be approximately -1.0
+                    # Account for exit costs in the R calculation
+                    exit_cost_pct = (params.fees_bps + params.slippage_bps) / 10000.0
+                    if is_long:
+                        # Exit at stop - exit_costs
+                        actual_exit = stop * (1 - exit_cost_pct)
+                        realized_r = (actual_exit - entry) / risk if risk > 0 else -1.0
+                    else:
+                        # Exit at stop + exit_costs
+                        actual_exit = stop * (1 + exit_cost_pct)
+                        realized_r = (entry - actual_exit) / risk if risk > 0 else -1.0
+                elif exit_reason == "TARGET":
+                    # Target hit: realized_R should be approximately +planned_R
+                    # Account for exit costs
+                    exit_cost_pct = (params.fees_bps + params.slippage_bps) / 10000.0
+                    if is_long:
+                        # Exit at target - exit_costs
+                        actual_exit = exit_price * (1 - exit_cost_pct)
+                        realized_r = (actual_exit - entry) / risk if risk > 0 else plan.r_multiple
+                    else:
+                        # Exit at target + exit_costs
+                        actual_exit = exit_price * (1 + exit_cost_pct)
+                        realized_r = (entry - actual_exit) / risk if risk > 0 else plan.r_multiple
                 else:
-                    realized_r = (entry - exit_price) / risk if risk > 0 else 0
+                    # EOD close or other: calculate actual R based on exit price
+                    exit_cost_pct = (params.fees_bps + params.slippage_bps) / 10000.0
+                    if is_long:
+                        actual_exit = exit_price * (1 - exit_cost_pct)
+                        realized_r = (actual_exit - entry) / risk if risk > 0 else 0
+                    else:
+                        actual_exit = exit_price * (1 + exit_cost_pct)
+                        realized_r = (entry - actual_exit) / risk if risk > 0 else 0
                 
                 # Update trade record
                 for trade in trades:
@@ -1232,21 +1368,81 @@ def execute_backtest_for_symbol(
         # OPTIMIZATION: Update active zones at this index (Phase 4)
         # Add newly created zones
         if ltf_idx in ltf_zones_by_creation:
-            for zone in ltf_zones_by_creation[ltf_idx]:
-                active_zones.add(zone)
+            for zone_id, zone in ltf_zones_by_creation[ltf_idx]:
+                active_zones[zone_id] = zone
+                total_activations += 1
+                
+                # PERFORMANCE: Add to flip boundary index
+                distal = zone.distal
+                bisect.insort(flip_boundary_index, (distal, zone_id))
+                zone_id_to_distal[zone_id] = distal
         
         # Remove zones that just became non-fresh
-        zones_to_remove = []
-        for zone in active_zones:
+        # IMPORTANT: Collect zone_ids first, then delete after iteration
+        zone_ids_to_remove = []
+        for zone_id, zone in active_zones.items():
             if not is_zone_fresh_at_idx(zone, ltf_idx):
-                zones_to_remove.append(zone)
-        for zone in zones_to_remove:
-            active_zones.discard(zone)
+                zone_ids_to_remove.append(zone_id)
+        
+        for zone_id in zone_ids_to_remove:
+            del active_zones[zone_id]
+            
+            # PERFORMANCE: Remove from flip boundary index
+            if zone_id in zone_id_to_distal:
+                distal = zone_id_to_distal[zone_id]
+                try:
+                    flip_boundary_index.remove((distal, zone_id))
+                except ValueError:
+                    pass  # Already removed or not present
+                del zone_id_to_distal[zone_id]
+        
+        # Update tracking metrics
+        active_zones_sum += len(active_zones)
+        active_zones_samples += 1
+        if len(active_zones) > max_active_zones:
+            max_active_zones = len(active_zones)
+        
+        # PERFORMANCE: Update polarity for zones whose flip boundary was crossed
+        # Only check zones where distal is between prev_close and current_close
+        if prev_close is not None and ltf_idx > 0 and len(flip_boundary_index) > 0:
+            lo = min(prev_close, current_close)
+            hi = max(prev_close, current_close)
+            
+            # Use bisect to find zones with distal in (lo, hi]
+            # Find leftmost index where distal > lo
+            left_idx = bisect.bisect_left(flip_boundary_index, (lo, ''))
+            # Find rightmost index where distal <= hi
+            right_idx = bisect.bisect_right(flip_boundary_index, (hi, '\uffff'))
+            
+            # Only check candidate zones (those whose distal was crossed)
+            candidate_zones = flip_boundary_index[left_idx:right_idx]
+            flip_checks_total += len(candidate_zones)
+            flip_checks_samples += 1
+            
+            for distal, zone_id in candidate_zones:
+                # Verify zone is still active (lazy deletion guard)
+                if zone_id not in active_zones:
+                    continue
+                
+                zone = active_zones[zone_id]
+                polarity_before = get_zone_polarity_at_idx(zone, ltf_idx - 1)
+                flipped = check_polarity_flip(zone, ltf_idx, current_close, prev_close)
+                
+                if flipped:
+                    polarity_after = zone.polarity_type
+                    total_flips += 1
+                    if polarity_before == ZoneType.SUPPLY and polarity_after == ZoneType.DEMAND:
+                        flips_supply_to_demand += 1
+                    elif polarity_before == ZoneType.DEMAND and polarity_after == ZoneType.SUPPLY:
+                        flips_demand_to_supply += 1
+        
+        # Store prev_close for next iteration
+        prev_close = current_close
         
         # Look for new setups - only check ACTIVE zones (Phase 4 + Phase 5)
         if ltf_idx > 100:  # Need some history for analysis
-            for zone in active_zones:
-                # Zone is guaranteed to be created and fresh (by active_zones set)
+            for zone_id, zone in active_zones.items():
+                # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
                 # Check if we already have a pending order or position for this zone
                 zone_already_traded = any(
@@ -1254,6 +1450,45 @@ def execute_backtest_for_symbol(
                 )
                 if zone_already_traded:
                     continue
+                
+                # ORDER DEDUPLICATION: Check if zone already has an active order
+                # Determine side based on current polarity
+                zone_polarity_check = get_zone_polarity_at_idx(zone, ltf_idx)
+                side_str = 'LONG' if zone_polarity_check == ZoneType.DEMAND else 'SHORT'
+                order_key = (zone_id, side_str)
+                
+                # Check if there's already an active order for this zone
+                if order_key in active_orders_by_zone:
+                    continue  # Skip - already have active order for this zone
+                
+                # Check order history for max_retries enforcement
+                if zone_id in order_history_by_zone:
+                    attempts = len(order_history_by_zone[zone_id])
+                    if attempts >= params.max_retries_per_zone:
+                        continue  # Max retries reached for this zone
+                
+                # Check if price reset is required for re-arming
+                if params.rearm_requires_price_reset and zone_id in zone_price_rearm_state:
+                    rearm_info = zone_price_rearm_state[zone_id]
+                    needs_reset = rearm_info.get('needs_reset', False)
+                    
+                    if needs_reset:
+                        # Check if price has moved away from zone (beyond proximal + buffer)
+                        proximal = zone.proximal
+                        buffer = abs(proximal) * params.rearm_price_buffer_pct
+                        
+                        if zone_polarity_check == ZoneType.DEMAND:
+                            # For demand, price must go above proximal + buffer
+                            price_reset = current_price > (proximal + buffer)
+                        else:
+                            # For supply, price must go below proximal - buffer
+                            price_reset = current_price < (proximal - buffer)
+                        
+                        if not price_reset:
+                            continue  # Price hasn't reset, can't place new order
+                        else:
+                            # Price has reset, clear the needs_reset flag
+                            zone_price_rearm_state[zone_id]['needs_reset'] = False
                 
                 # Apply MTF gating BEFORE scoring (performance optimization)
                 # Convert curve and trend to string format for should_allow_trade
@@ -1284,18 +1519,23 @@ def execute_backtest_for_symbol(
                 
                 # Passed gating - now score the zone
                 # Find opposing zone (nearest fresh zone of opposite type)
+                # Use dynamic polarity for zone type determination
+                zone_polarity_now = get_zone_polarity_at_idx(zone, ltf_idx)
+                
                 opposing_zone = None
-                if zone.zone_type == ZoneType.DEMAND:
+                if zone_polarity_now == ZoneType.DEMAND:
                     # Find nearest fresh supply above
                     for z in ltf_zones:
-                        if z.zone_type == ZoneType.SUPPLY and z.proximal > current_price:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.SUPPLY and z.proximal > current_price:
                             if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
                                 if opposing_zone is None or z.proximal < opposing_zone.proximal:
                                     opposing_zone = z
                 else:  # SUPPLY
                     # Find nearest fresh demand below
                     for z in ltf_zones:
-                        if z.zone_type == ZoneType.DEMAND and z.proximal < current_price:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.DEMAND and z.proximal < current_price:
                             if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
                                 if opposing_zone is None or z.proximal > opposing_zone.proximal:
                                     opposing_zone = z
@@ -1334,9 +1574,31 @@ def execute_backtest_for_symbol(
                 funnel.orders_placed += 1
                 
                 # Create order record with curve and trend state
-                zone_id = f"{symbol}_{zone.created_at}_{zone.zone_type.value}"
-                side = 'LONG' if zone.zone_type == ZoneType.DEMAND else 'SHORT'
+                # Use dynamic polarity at order placement time
+                order_polarity = get_zone_polarity_at_idx(zone, ltf_idx)
+                # Use make_zone_id for consistency
+                side = 'LONG' if order_polarity == ZoneType.DEMAND else 'SHORT'
                 expiry_idx = ltf_idx + params.ttl_bars if params.ttl_bars else None
+                
+                # ORDER DEDUPLICATION: Register this order in active_orders_by_zone
+                order_key = (zone_id, side)
+                order_info = {
+                    'zone_id': zone_id,
+                    'side': side,
+                    'placed_idx': ltf_idx,
+                    'expiry_idx': expiry_idx,
+                    'plan': plan,
+                }
+                active_orders_by_zone[order_key] = order_info
+                
+                # Track order history for this zone
+                if zone_id not in order_history_by_zone:
+                    order_history_by_zone[zone_id] = []
+                order_history_by_zone[zone_id].append({
+                    'placed_idx': ltf_idx,
+                    'side': side,
+                    'expiry_idx': expiry_idx,
+                })
                 
                 orders.append({
                     'symbol': symbol,
@@ -1357,23 +1619,34 @@ def execute_backtest_for_symbol(
                     'cancel_reason': None,
                     'curve_state': enum_to_string(curve_state),
                     'trend_state': enum_to_string(trend_state),
+                    # Polarity tracking
+                    'polarity_type_at_order': enum_to_string(order_polarity),
+                    'flip_count_at_order': zone.flip_count,
                 })
     
     # Close any remaining open positions at EOD (end of data)
     if ltf_candles:
         for plan in open_positions:
-            is_long = plan.zone.zone_type == ZoneType.DEMAND
+            # Use polarity at entry for EOD close
+            plan_entry_idx = plan.filled_at_idx
+            entry_polarity = get_zone_polarity_at_idx(plan.zone, plan_entry_idx) if plan_entry_idx is not None else plan.zone.zone_type
+            is_long = entry_polarity == ZoneType.DEMAND
             exit_price = ltf_candles[-1]['close']
             
             pnl = calculate_pnl_with_costs(plan, exit_price, params)
             
+            # Calculate realized_R with exit costs for EOD close
             entry = plan.actual_entry_price or plan.entry_price
             stop = plan.stop_loss
             risk = abs(entry - stop)
+            
+            exit_cost_pct = (params.fees_bps + params.slippage_bps) / 10000.0
             if is_long:
-                realized_r = (exit_price - entry) / risk if risk > 0 else 0
+                actual_exit = exit_price * (1 - exit_cost_pct)
+                realized_r = (actual_exit - entry) / risk if risk > 0 else 0
             else:
-                realized_r = (entry - exit_price) / risk if risk > 0 else 0
+                actual_exit = exit_price * (1 + exit_cost_pct)
+                realized_r = (entry - actual_exit) / risk if risk > 0 else 0
             
             # Update trade record
             for trade in trades:
@@ -1391,6 +1664,47 @@ def execute_backtest_for_symbol(
             equity_curve.append(capital)
             funnel.trades_closed += 1
     
+    # Calculate zones_fresh_final: count zones that are fresh at END of simulation
+    end_idx = len(ltf_candles) - 1
+    funnel.zones_fresh_final = sum(1 for z in ltf_zones if is_zone_fresh_at_idx(z, end_idx))
+    
+    # Calculate and print runtime sanity metrics
+    avg_active_zones = active_zones_sum / active_zones_samples if active_zones_samples > 0 else 0.0
+    avg_flip_checks = flip_checks_total / flip_checks_samples if flip_checks_samples > 0 else 0.0
+    
+    # Print activation metrics (useful for debugging)
+    print(f"\n{'='*80}")
+    print(f"ACTIVE ZONE MANAGER METRICS - {symbol}")
+    print(f"{'='*80}")
+    print(f"{'Total Activations':30s}: {total_activations}")
+    print(f"{'Max Active Zones':30s}: {max_active_zones}")
+    print(f"{'Avg Active Zones':30s}: {avg_active_zones:.2f}")
+    print(f"{'Zones Detected (LTF)':30s}: {len(ltf_zones)}")
+    print(f"{'Candidates Scored':30s}: {funnel.candidates_scored}")
+    print(f"{'Orders Placed':30s}: {funnel.orders_placed}")
+    print(f"")
+    print(f"{'='*80}")
+    print(f"POLARITY FLIP PERFORMANCE - {symbol}")
+    print(f"{'='*80}")
+    print(f"{'Total Flips':30s}: {total_flips}")
+    print(f"{'Avg Flip Checks/Candle':30s}: {avg_flip_checks:.2f}")
+    print(f"{'Flip Check Efficiency':30s}: {(avg_flip_checks / avg_active_zones * 100 if avg_active_zones > 0 else 0):.1f}% of active zones")
+    print(f"{'Expected if no index':30s}: {avg_active_zones:.2f} checks/candle")
+    
+    # Sanity check: If zones detected but no activations, something is wrong
+    if len(ltf_zones) > 0 and total_activations == 0:
+        print(f"\n⚠️  WARNING: {len(ltf_zones)} zones detected but ZERO activations!")
+        print(f"   This indicates ltf_zones_by_creation is not being populated correctly.")
+        print(f"   Check that zone.created_at values are within [0, {len(ltf_candles)-1}]")
+        
+        # Debug info: Show created_at range
+        created_at_values = [z.created_at for z in ltf_zones]
+        if created_at_values:
+            print(f"   Zone created_at range: [{min(created_at_values)}, {max(created_at_values)}]")
+            print(f"   LTF candle index range: [0, {len(ltf_candles)-1}]")
+    
+    print(f"{'='*80}\n")
+    
     if enable_profiling:
         stage_timings['backtest_loop'] = time.time() - stage_start
         stage_start = time.time()
@@ -1403,9 +1717,12 @@ def execute_backtest_for_symbol(
         # Calculate final_is_fresh: is zone fresh at the END of the simulation?
         final_is_fresh = is_zone_fresh_at_idx(zone, end_idx)
         
+        # Get final polarity at end of simulation
+        final_polarity = get_zone_polarity_at_idx(zone, end_idx)
+        
         zone_dicts.append({
             'symbol': symbol,
-            'zone_type': zone.zone_type.value,
+            'zone_type': zone.zone_type.value,  # Original detection type
             'proximal': zone.proximal,
             'distal': zone.distal,
             'created_at': zone.created_at,
@@ -1418,6 +1735,11 @@ def execute_backtest_for_symbol(
             'final_is_fresh': final_is_fresh,  # Is it fresh at END of simulation?
             # DEPRECATED: kept for backward compatibility
             'is_fresh': zone.is_fresh,  # Same as ever_touched (inverted)
+            # Polarity fields
+            'original_type': zone.original_type.value if zone.original_type else zone.zone_type.value,
+            'final_polarity_type': final_polarity.value,
+            'flip_count': zone.flip_count,
+            'last_flip_idx': zone.last_flip_idx,
         })
     
     if enable_profiling:
@@ -1449,6 +1771,11 @@ def execute_backtest_for_symbol(
             print(f"{'Candidates/Candle Ratio':25s}: {scoring_rate:.4f}")
         
         print("=" * 80 + "\n")
+    
+    # Update funnel with polarity flip metrics
+    funnel.total_flips = total_flips
+    funnel.flips_supply_to_demand = flips_supply_to_demand
+    funnel.flips_demand_to_supply = flips_demand_to_supply
     
     return trades, zone_dicts, orders, capital, equity_curve, funnel
 
@@ -2217,6 +2544,7 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'zones_detected_htf': sum(f.zones_detected_htf for f in result.decision_funnels),
             'zones_fresh_ltf': sum(f.zones_fresh_ltf for f in result.decision_funnels),
             'zones_fresh_htf': sum(f.zones_fresh_htf for f in result.decision_funnels),
+            'zones_fresh_final': sum(f.zones_fresh_final for f in result.decision_funnels),
             'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
             'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
@@ -2226,6 +2554,10 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
             'trades_closed': sum(f.trades_closed for f in result.decision_funnels),
+            # Polarity flip metrics
+            'total_flips': sum(f.total_flips for f in result.decision_funnels),
+            'flips_supply_to_demand': sum(f.flips_supply_to_demand for f in result.decision_funnels),
+            'flips_demand_to_supply': sum(f.flips_demand_to_supply for f in result.decision_funnels),
             # Legacy fields for backward compatibility
             'zones_detected': sum(f.zones_detected for f in result.decision_funnels),
             'zones_fresh': sum(f.zones_fresh for f in result.decision_funnels),
@@ -2273,7 +2605,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     print("=" * 80)
     agg = funnel_data['aggregate']
     print(f"Zones Detected:              {agg['zones_detected']}")
-    print(f"  └─ Fresh:                  {agg['zones_fresh']}")
+    print(f"  ├─ Fresh at START:         {agg['zones_fresh_ltf']}")
+    print(f"  └─ Fresh at END:           {agg['zones_fresh_final']}")
     if agg['zones_after_curve_filter'] > 0:
         print(f"  └─ After Curve Filter:     {agg['zones_after_curve_filter']}")
     if agg['zones_after_trend_filter'] > 0:
