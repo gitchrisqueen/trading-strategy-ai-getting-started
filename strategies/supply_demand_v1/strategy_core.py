@@ -1,48 +1,27 @@
-"""Supply and Demand Trading Strategy - Execution Layer
+"""Supply and Demand Trading Strategy - Core Logic (Framework-Agnostic)
 
-This module provides backward compatibility by re-exporting framework-agnostic
-strategy logic from strategy_core.py and adding execution-specific functions.
+This module contains the framework-agnostic core strategy logic extracted from strategy.py.
+It includes:
+- Zone detection (DBR/RBD patterns)
+- Freshness tracking
+- Multi-timeframe analysis (HTF curve, ITF trend)
+- Scoring (odds enhancers)
+- Trade planning (entry/stop/target calculations)
 
-Execution-specific logic:
-- Fill simulation (check_limit_order_fill)
-- Position management (manage_trade_plan, check_intrabar_exit)
-- PnL calculation (calculate_pnl_with_costs)
-- Trading costs (calculate_trading_costs)
-- Framework interface (create_strategy_universe, create_indicators, decide_trades)
+This code is independent of any execution framework and can be used with:
+- CSV backtest adapter (current)
+- Upstream Trading Strategy framework adapter (future)
+- Any other execution framework
+
+Note: Execution-specific logic (order fills, TTL, position management, PnL calculation)
+remains in strategy.py for now.
 """
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
 from enum import Enum
 
-# Re-export everything from strategy_core for backward compatibility
-from .strategy_core import *
 
-# Explicitly list what we're exporting for clarity
-from .strategy_core import (
-    # Enums
-    CurveLocation, TrendDirection, ZoneType, EntryMode, OrderState,
-    # Data classes
-    SupplyDemandParameters, Zone, TradePlan,
-    # Zone detection
-    identify_boring_candles, identify_exciting_candles,
-    detect_zones_dbr_rbd, compute_zone_lines_proximal_distal,
-    # Freshness
-    is_zone_fresh,
-    # Multi-timeframe
-    find_nearest_fresh_zones_htf, curve_location, trend_direction_itf,
-    detect_pivot_highs_lows, detect_pivot_highs_lows_bounded,
-    find_nearest_fresh_supply_above, find_nearest_fresh_demand_below,
-    classify_curve, classify_trend,
-    # Gating
-    should_allow_trade,
-    # Scoring
-    odds_enhancer_score,
-    # Trade planning
-    build_trade_plan, position_size,
-    # Utility
-    calculate_body_and_range, calculate_r_multiple,
-)
 
 class CurveLocation(Enum):
     """Price location within the HTF range"""
@@ -138,11 +117,6 @@ class SupplyDemandParameters:
     
     # Limit Order Configuration
     ttl_bars: Optional[int] = 10  # Time-to-live in bars for limit orders (None = no expiry)
-    
-    # Order Deduplication & Retry Policy
-    max_retries_per_zone: int = 1  # Maximum order placement attempts per zone (default 1 = no retries)
-    rearm_requires_price_reset: bool = True  # Require price to move away from zone before retry
-    rearm_price_buffer_pct: float = 0.005  # Price must move beyond proximal + 0.5% to rearm
 
 
 @dataclass
@@ -150,7 +124,7 @@ class Zone:
     """Represents a supply or demand zone
     
     Attributes:
-        zone_type: SUPPLY or DEMAND (original detection type - IMMUTABLE)
+        zone_type: SUPPLY or DEMAND
         proximal: Price level closest to current price (entry reference)
         distal: Price level farthest from current price (stop reference)
         created_at: Index where zone was created (legout_end_idx)
@@ -165,13 +139,6 @@ class Zone:
         first_touch_idx: Index when zone was first touched (None if never touched)
         ever_touched: Whether zone was EVER touched (final state, NOT time-relative)
         last_checked_idx: Last candle index where freshness was checked (for incremental updates)
-        
-        POLARITY FIELDS (for dynamic supply/demand flipping):
-        original_type: SUPPLY or DEMAND (same as zone_type, kept for clarity)
-        polarity_type: SUPPLY or DEMAND (mutable, changes based on price breaks)
-        flip_count: Number of times polarity has flipped
-        last_flip_idx: Index of most recent polarity flip (None if never flipped)
-        last_polarity_check_idx: Last index where polarity was checked
         
         DEPRECATED FIELDS (for backward compatibility):
         is_fresh: DEPRECATED - Use is_zone_fresh_at_idx() instead for time-relative freshness
@@ -194,116 +161,6 @@ class Zone:
     last_checked_idx: int = -1  # Track last checked index for incremental updates
     # DEPRECATED: Use is_zone_fresh_at_idx() for time-relative freshness
     is_fresh: bool = True  # Kept for backward compatibility only
-    # Polarity fields (dynamic zone type)
-    original_type: Optional[ZoneType] = None  # Set during initialization
-    polarity_type: Optional[ZoneType] = None  # Current polarity (changes over time)
-    flip_count: int = 0  # Number of times polarity flipped
-    last_flip_idx: Optional[int] = None  # Index of most recent flip
-    last_polarity_check_idx: int = -1  # Last index where polarity was updated
-
-
-def initialize_zone_polarity(zone: Zone) -> None:
-    """Initialize polarity fields for a newly created zone
-    
-    Sets original_type and polarity_type to the detected zone_type.
-    Called once when zone is first created.
-    
-    Args:
-        zone: Zone object to initialize
-    
-    Side effects:
-        Sets zone.original_type and zone.polarity_type
-    """
-    if zone.original_type is None:
-        zone.original_type = zone.zone_type
-    if zone.polarity_type is None:
-        zone.polarity_type = zone.zone_type
-
-
-def check_polarity_flip(
-    zone: Zone,
-    current_idx: int,
-    current_close: float,
-    prev_close: float
-) -> bool:
-    """Check if zone polarity should flip based on price crossing distal boundary
-    
-    Uses conservative "decisive break" rule with hysteresis:
-    - Supply→Demand flip: previous close <= distal AND current close > distal
-    - Demand→Supply flip: previous close >= distal AND current close < distal
-    
-    Args:
-        zone: Zone to check
-        current_idx: Current candle index
-        current_close: Current candle close price
-        prev_close: Previous candle close price
-    
-    Returns:
-        True if polarity flipped, False otherwise
-    
-    Side effects:
-        Updates zone.polarity_type, zone.flip_count, zone.last_flip_idx if flip occurs
-    """
-    # Skip if already checked at this index
-    if zone.last_polarity_check_idx >= current_idx:
-        return False
-    
-    zone.last_polarity_check_idx = current_idx
-    
-    # Get current polarity (use zone_type if polarity_type not initialized)
-    current_polarity = zone.polarity_type if zone.polarity_type is not None else zone.zone_type
-    
-    # Use distal as flip boundary (most conservative)
-    flip_boundary = zone.distal
-    
-    flipped = False
-    
-    if current_polarity == ZoneType.SUPPLY:
-        # Supply flips to Demand when price decisively breaks ABOVE distal
-        if prev_close <= flip_boundary and current_close > flip_boundary:
-            zone.polarity_type = ZoneType.DEMAND
-            zone.flip_count += 1
-            zone.last_flip_idx = current_idx
-            flipped = True
-    elif current_polarity == ZoneType.DEMAND:
-        # Demand flips to Supply when price decisively breaks BELOW distal
-        if prev_close >= flip_boundary and current_close < flip_boundary:
-            zone.polarity_type = ZoneType.SUPPLY
-            zone.flip_count += 1
-            zone.last_flip_idx = current_idx
-            flipped = True
-    
-    return flipped
-
-
-def get_zone_polarity_at_idx(zone: Zone, idx: int) -> ZoneType:
-    """Get the polarity of a zone at a specific index
-    
-    Returns the polarity type that should be used for trading decisions at the given index.
-    If polarity hasn't been initialized or updated yet, returns the original zone_type.
-    
-    Args:
-        zone: Zone object
-        idx: Candle index
-    
-    Returns:
-        Current polarity type (SUPPLY or DEMAND)
-    """
-    # If polarity never initialized, use original type
-    if zone.polarity_type is None:
-        return zone.zone_type
-    
-    # If there have been flips and the requested idx is at or after the last flip,
-    # use the current polarity_type
-    if zone.last_flip_idx is not None and idx >= zone.last_flip_idx:
-        return zone.polarity_type
-    
-    # If we've checked polarity up to this index (but no flip yet), use polarity_type
-    if zone.last_polarity_check_idx >= idx:
-        return zone.polarity_type
-    
-    # Otherwise, use original type (polarity not updated yet to this point)
-    return zone.zone_type
 
 
 @dataclass
@@ -348,7 +205,7 @@ class TradePlan:
 
 
 # ============================================================================
-# Trading Strategy Framework Interface Functions
+# Main Strategy Functions (Trading Strategy Framework Interface)
 # ============================================================================
 
 def create_strategy_universe(
@@ -439,6 +296,12 @@ def decide_trades(
 # Candle Analysis Functions
 # ============================================================================
 
+
+
+# ============================================================================
+# Framework-Agnostic Strategy Functions
+# ============================================================================
+
 def identify_boring_candles(
     candles: Any,
     body_ratio: float = 0.50
@@ -469,6 +332,8 @@ def identify_boring_candles(
             is_boring = body <= body_ratio * range_val
         result.append(is_boring)
     return result
+
+
 
 
 def identify_exciting_candles(
@@ -504,6 +369,8 @@ def identify_exciting_candles(
 # ============================================================================
 # Zone Detection Functions
 # ============================================================================
+
+
 
 def detect_zones_dbr_rbd(
     candles: Any,
@@ -655,15 +522,14 @@ def detect_zones_dbr_rbd(
             is_fresh=True
         )
         
-        # Initialize polarity fields
-        initialize_zone_polarity(zone)
-        
         zones.append(zone)
         
         # Move past this pattern to look for next zone
         i = legout_end
     
     return zones
+
+
 
 
 def compute_zone_lines_proximal_distal(
@@ -730,6 +596,8 @@ def compute_zone_lines_proximal_distal(
         distal = max(c['high'] for c in full_pattern)
     
     return proximal, distal
+
+
 
 
 def is_zone_fresh(
@@ -801,6 +669,8 @@ def is_zone_fresh(
 # Multi-Timeframe Analysis
 # ============================================================================
 
+
+
 def find_nearest_fresh_zones_htf(
     candles: Any,
     current_price: float,
@@ -858,6 +728,8 @@ def find_nearest_fresh_zones_htf(
     return supply_above, demand_below
 
 
+
+
 def curve_location(
     current_price: float,
     supply_zone_above: Optional[Zone],
@@ -913,6 +785,8 @@ def curve_location(
         return CurveLocation.EQUILIBRIUM
     else:
         return CurveLocation.HIGH
+
+
 
 
 def trend_direction_itf(
@@ -1016,6 +890,8 @@ def trend_direction_itf(
         return TrendDirection.SIDEWAYS
 
 
+
+
 def find_nearest_fresh_supply_above(
     current_price: float,
     zones_htf: List[Zone]
@@ -1044,6 +920,8 @@ def find_nearest_fresh_supply_above(
     return supply_above
 
 
+
+
 def find_nearest_fresh_demand_below(
     current_price: float,
     zones_htf: List[Zone]
@@ -1070,6 +948,8 @@ def find_nearest_fresh_demand_below(
                     demand_below = zone
     
     return demand_below
+
+
 
 
 def classify_curve(
@@ -1131,6 +1011,8 @@ def classify_curve(
         return "HIGH"
     else:
         return "EQ"
+
+
 
 
 def classify_trend(
@@ -1212,6 +1094,8 @@ def classify_trend(
         return "SIDEWAYS"
 
 
+
+
 def should_allow_trade(
     zone: Zone,
     curve_state: str,
@@ -1282,6 +1166,8 @@ def should_allow_trade(
 # ============================================================================
 # Odds Enhancer Scoring
 # ============================================================================
+
+
 
 def odds_enhancer_score(
     zone: Zone,
@@ -1375,282 +1261,343 @@ def odds_enhancer_score(
 
 
 # ============================================================================
-# Execution-Specific Functions
+# Trade Planning and Execution
 # ============================================================================
 
-def check_intrabar_exit(
-    trade_plan: TradePlan,
-    candle: Dict[str, Any],
-    parameters: SupplyDemandParameters,
-    stop_wins_on_same_bar: bool = True
-) -> Optional[str]:
-    """Check if position should exit on current candle (stop or target hit)
-    
-    Evaluates intrabar price action to determine if stop loss or take profit
-    target was hit during the candle.
-    
-    Args:
-        trade_plan: Active trade plan with filled order
-        candle: Current OHLC candle
-        parameters: Strategy parameters (not currently used but kept for consistency)
-        stop_wins_on_same_bar: If both stop and target hit on same bar, assume stop wins first
-    
-    Returns:
-        Exit reason string: "STOP", "TARGET", or None if no exit
-    
-    Logic:
-        - Long position:
-          - Stop hit if candle low <= stop_loss
-          - Target hit if candle high >= take_profit
-        - Short position:
-          - Stop hit if candle high >= stop_loss
-          - Target hit if candle low <= take_profit
-        - If both hit on same bar: stop_wins_on_same_bar determines outcome (default: "STOP")
-    """
-    if trade_plan.order_state != OrderState.FILLED:
-        return None
-    
-    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
-    
-    stop_hit = False
-    target_hit = False
-    
-    if is_long:
-        # Long position
-        stop_hit = candle['low'] <= trade_plan.stop_loss
-        target_hit = candle['high'] >= trade_plan.take_profit
-    else:
-        # Short position
-        stop_hit = candle['high'] >= trade_plan.stop_loss
-        target_hit = candle['low'] <= trade_plan.take_profit
-    
-    # Handle both hit on same bar
-    if stop_hit and target_hit:
-        # Conservative approach: assume stop hit first
-        return "STOP" if stop_wins_on_same_bar else "TARGET"
-    
-    if stop_hit:
-        return "STOP"
-    
-    if target_hit:
-        return "TARGET"
-    
-    return None
 
 
-def manage_trade_plan(
-
-
-def manage_trade_plan(
-    trade_plan: TradePlan,
+def build_trade_plan(
+    zone: Zone,
     current_price: float,
-    parameters: SupplyDemandParameters
-) -> Dict[str, Any]:
-    """Manage active trade: update stops based on profit levels
+    account_size: float,
+    parameters: SupplyDemandParameters,
+    opposing_zone: Optional[Zone] = None,
+    score: float = 0.0
+) -> Optional[TradePlan]:
+    """Build complete trade plan (SET: Stop, Entry, Target) for a zone
     
-    Implements Plan #1 (default):
-    - At 2R: Move stop to breakeven
-    - At 3R: Keep monitoring (exit handled by check_intrabar_exit)
-    
-    Note: This function handles stop management only. Exit detection
-    should use check_intrabar_exit() which checks intrabar stop/target hits.
+    Creates a trade plan including entry price, stop loss, take profit target,
+    and position sizing based on risk management rules.
     
     Args:
-        trade_plan: Active trade plan
-        current_price: Current price (typically close of current candle)
+        zone: Zone to trade
+        current_price: Current price
+        account_size: Current account size for position sizing
         parameters: Strategy parameters
+        opposing_zone: Nearest opposing zone (for target placement)
+        score: Odds enhancer score for this setup
     
     Returns:
-        Dictionary with management actions:
-        - "update_stop": New stop price if should be moved
-        - "current_r": Current R multiple achieved
-    """
-    # Determine if long or short
-    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+        TradePlan object or None if plan is invalid
     
-    # Calculate current R multiple based on close price
-    current_r = calculate_r_multiple(
-        trade_plan.actual_entry_price or trade_plan.entry_price,
-        current_price,
-        trade_plan.stop_loss,
-        is_long
+    Rules (V1 Policy):
+        - Entry: At proximal line (limit order)
+        - Stop: Beyond distal line (with buffer)
+        - Target: Opposing zone proximal if available_R >= 3.0, else skip trade
+        - If no opposing zone: Minimum 3R target
+        - Position size: 2% risk rule
+    """
+    # Entry at proximal line
+    entry_price = zone.proximal
+    
+    # Stop beyond distal with buffer
+    if zone.zone_type == ZoneType.DEMAND:
+        # Long position: stop below distal
+        stop_loss = zone.distal * (1 - parameters.stop_buffer_pct)
+        is_long = True
+    else:
+        # Short position: stop above distal
+        stop_loss = zone.distal * (1 + parameters.stop_buffer_pct)
+        is_long = False
+    
+    # Calculate risk
+    risk = abs(entry_price - stop_loss)
+    
+    if risk <= 0:
+        return None  # Invalid trade plan
+    
+    # V1 Policy: Check available R to opposing zone first
+    if opposing_zone is not None:
+        # Calculate available R to opposing zone proximal
+        if zone.zone_type == ZoneType.DEMAND:
+            # Long: opposing zone is supply above
+            max_reward = abs(opposing_zone.proximal - entry_price)
+        else:
+            # Short: opposing zone is demand below
+            max_reward = abs(entry_price - opposing_zone.proximal)
+        
+        available_r = max_reward / risk
+        
+        # V1 Policy: Skip trade if available_R < 3.0
+        if available_r < parameters.min_reward_risk:
+            return None  # Insufficient R available to opposing zone
+        
+        # V1 Policy: Target at opposing zone proximal (available_R >= 3.0)
+        take_profit = opposing_zone.proximal
+    else:
+        # No opposing zone: use minimum 3R target
+        min_target_distance = risk * parameters.min_reward_risk
+        
+        if zone.zone_type == ZoneType.DEMAND:
+            # Long: target above entry
+            take_profit = entry_price + min_target_distance
+        else:
+            # Short: target below entry
+            take_profit = entry_price - min_target_distance
+    
+    # Calculate R multiple for this target
+    reward = abs(take_profit - entry_price)
+    r_multiple = reward / risk
+    
+    # Enforce minimum 3R requirement (should always pass given logic above)
+    if r_multiple < parameters.min_reward_risk:
+        return None  # Does not meet minimum R:R
+    
+    # Calculate position size using risk percentage rule
+    pos_size = position_size(account_size, entry_price, stop_loss, parameters.risk_pct)
+    
+    # Calculate dollar amounts
+    risk_amount = account_size * parameters.risk_pct
+    reward_amount = pos_size * reward
+    
+    # Create trade plan
+    trade_plan = TradePlan(
+        zone=zone,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        position_size=pos_size,
+        risk_amount=risk_amount,
+        reward_amount=reward_amount,
+        r_multiple=r_multiple,
+        score=score
     )
     
-    result = {
-        "update_stop": None,
-        "current_r": current_r
-    }
-    
-    # Check if we should move stop to breakeven
-    if current_r >= parameters.breakeven_at_r:
-        # Move stop to breakeven (entry price) if not already moved
-        entry_price = trade_plan.actual_entry_price or trade_plan.entry_price
-        if trade_plan.stop_loss != entry_price:
-            result["update_stop"] = entry_price
-    
-    return result
+    return trade_plan
 
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def calculate_r_multiple(
 
 
-def calculate_trading_costs(
-    price: float,
-    position_size: float,
-    fees_bps: float,
-    slippage_bps: float
+def position_size(
+    account_size: float,
+    entry_price: float,
+    stop_loss: float,
+    risk_pct: float = 0.02
 ) -> float:
-    """Calculate total trading costs (fees + slippage)
+    """Calculate position size based on risk management rules
+    
+    Uses the 2% rule: risk no more than 2% of account per trade.
     
     Args:
-        price: Trade price
-        position_size: Position size in units
-        fees_bps: Trading fees in basis points
-        slippage_bps: Slippage in basis points
+        account_size: Current account value
+        entry_price: Planned entry price
+        stop_loss: Planned stop loss price
+        risk_pct: Risk percentage (default 0.02 = 2%)
     
     Returns:
-        Total cost in dollars
+        Position size in units
     
     Formula:
-        total_bps = fees_bps + slippage_bps
-        cost = (price * position_size * total_bps) / 10000
+        risk_amount = account_size * risk_pct
+        risk_per_unit = abs(entry_price - stop_loss)
+        position_size = risk_amount / risk_per_unit
     """
-    total_bps = fees_bps + slippage_bps
-    cost = (price * position_size * total_bps) / 10000.0
-    return cost
-
-
-def check_limit_order_fill(
-
-
-def check_limit_order_fill(
-    trade_plan: TradePlan,
-    candles: Any,
-    current_idx: int,
-    parameters: SupplyDemandParameters
-) -> bool:
-    """Check if a limit order should be filled based on price action
+    # Calculate risk amount
+    risk_amount = account_size * risk_pct
     
-    Args:
-        trade_plan: Trade plan with pending limit order
-        candles: OHLC candle data
-        current_idx: Current candle index
-        parameters: Strategy parameters
+    # Calculate risk per unit
+    risk_per_unit = abs(entry_price - stop_loss)
     
-    Returns:
-        True if order should be filled, False otherwise
-    
-    Side effects:
-        Updates trade_plan.order_state, trade_plan.filled_at_idx,
-        trade_plan.actual_entry_price, and trade_plan.entry_cost
-    
-    Rules:
-        - Long (DEMAND): fills if candle's low <= limit price
-        - Short (SUPPLY): fills if candle's high >= limit price
-        - TTL: Cancel if (current_idx - placed_at_idx) >= ttl_bars
-    """
-    # Check if order is still pending
-    if trade_plan.order_state != OrderState.PENDING:
-        return False
-    
-    # Check TTL expiration
-    if parameters.ttl_bars is not None and trade_plan.placed_at_idx is not None:
-        bars_elapsed = current_idx - trade_plan.placed_at_idx
-        if bars_elapsed >= parameters.ttl_bars:
-            # Cancel the order
-            trade_plan.order_state = OrderState.CANCELLED
-            return False
-    
-    # Get current candle
-    candle = candles[current_idx]
-    limit_price = trade_plan.entry_price
-    
-    # Check if price touched the limit
-    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
-    touched = False
-    
-    if is_long:
-        # Long: fills if low <= limit
-        touched = candle['low'] <= limit_price
-    else:
-        # Short: fills if high >= limit
-        touched = candle['high'] >= limit_price
-    
-    if touched:
-        # Order is filled
-        trade_plan.order_state = OrderState.FILLED
-        trade_plan.filled_at_idx = current_idx
-        
-        # Calculate actual entry price with slippage
-        # Slippage works against us: longs pay more, shorts receive less
-        slippage_amount = (limit_price * parameters.slippage_bps) / 10000.0
-        
-        if is_long:
-            actual_price = limit_price + slippage_amount
-        else:
-            actual_price = limit_price - slippage_amount
-        
-        trade_plan.actual_entry_price = actual_price
-        
-        # Calculate entry costs (fees + slippage)
-        trade_plan.entry_cost = calculate_trading_costs(
-            actual_price,
-            trade_plan.position_size,
-            parameters.fees_bps,
-            parameters.slippage_bps
-        )
-        
-        return True
-    
-    return False
-
-
-def calculate_pnl_with_costs(
-
-
-def calculate_pnl_with_costs(
-    trade_plan: TradePlan,
-    exit_price: float,
-    parameters: SupplyDemandParameters
-) -> float:
-    """Calculate profit/loss including all trading costs
-    
-    Args:
-        trade_plan: Trade plan with filled order
-        exit_price: Exit price
-        parameters: Strategy parameters
-    
-    Returns:
-        Net profit/loss in dollars
-    
-    Formula:
-        For long: PnL = (exit_price - actual_entry_price) * position_size - entry_cost - exit_cost
-        For short: PnL = (actual_entry_price - exit_price) * position_size - entry_cost - exit_cost
-    """
-    if trade_plan.order_state != OrderState.FILLED or trade_plan.actual_entry_price is None:
+    # Avoid division by zero
+    if risk_per_unit <= 0:
         return 0.0
     
-    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    # Calculate position size
+    pos_size = risk_amount / risk_per_unit
     
-    # Calculate exit cost
-    exit_cost = calculate_trading_costs(
-        exit_price,
-        trade_plan.position_size,
-        parameters.fees_bps,
-        parameters.slippage_bps
-    )
+    return pos_size
+
+
+
+
+def calculate_r_multiple(
+    entry_price: float,
+    current_price: float,
+    stop_loss: float,
+    is_long: bool
+) -> float:
+    """Calculate current R multiple for a position
     
-    # Calculate gross PnL
+    R multiple represents profit/loss as a multiple of initial risk.
+    
+    Args:
+        entry_price: Entry price
+        current_price: Current price
+        stop_loss: Stop loss price
+        is_long: True for long position, False for short
+    
+    Returns:
+        R multiple (positive = profit, negative = loss)
+    
+    Formula:
+        risk = abs(entry_price - stop_loss)
+        profit = (current_price - entry_price) if long else (entry_price - current_price)
+        r_multiple = profit / risk
+    """
+    risk = abs(entry_price - stop_loss)
+    
+    if risk <= 0:
+        return 0.0
+    
     if is_long:
-        gross_pnl = (exit_price - trade_plan.actual_entry_price) * trade_plan.position_size
+        profit = current_price - entry_price
     else:
-        gross_pnl = (trade_plan.actual_entry_price - exit_price) * trade_plan.position_size
+        profit = entry_price - current_price
     
-    # Subtract costs
-    net_pnl = gross_pnl - trade_plan.entry_cost - exit_cost
+    r_multiple = profit / risk
     
-    return net_pnl
+    return r_multiple
+
+
+
+
+def calculate_body_and_range(
+    candle: Any
+) -> Tuple[float, float]:
+    """Calculate candle body and range
+    
+    Args:
+        candle: Single OHLC candle with 'open', 'close', 'high', 'low' attributes
+    
+    Returns:
+        Tuple of (body, range)
+    
+    Formula:
+        body = abs(close - open)
+        range = high - low
+    """
+    body = abs(candle['close'] - candle['open'])
+    range_val = candle['high'] - candle['low']
+    return body, range_val
+
+
+
+
+def detect_pivot_highs_lows(
+    candles: Any,
+    lookback: int = 5
+) -> Tuple[List[int], List[int]]:
+    """Detect pivot high and low points in price data
+    
+    A pivot high is a local maximum with lower highs on both sides.
+    A pivot low is a local minimum with higher lows on both sides.
+    
+    Args:
+        candles: OHLC candle data
+        lookback: Number of candles to look back/forward for confirmation
+    
+    Returns:
+        Tuple of (pivot_high_indices, pivot_low_indices)
+    """
+    pivot_highs = []
+    pivot_lows = []
+    
+    # Need at least lookback*2 + 1 candles to detect a pivot
+    if len(candles) < lookback * 2 + 1:
+        return pivot_highs, pivot_lows
+    
+    # Scan for pivots (cannot detect in first/last 'lookback' candles)
+    for i in range(lookback, len(candles) - lookback):
+        current_high = candles[i]['high']
+        current_low = candles[i]['low']
+        
+        # Check for pivot high
+        is_pivot_high = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['high'] >= current_high or candles[i + j]['high'] >= current_high:
+                is_pivot_high = False
+                break
+        
+        if is_pivot_high:
+            pivot_highs.append(i)
+        
+        # Check for pivot low
+        is_pivot_low = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['low'] <= current_low or candles[i + j]['low'] <= current_low:
+                is_pivot_low = False
+                break
+        
+        if is_pivot_low:
+            pivot_lows.append(i)
+    
+    return pivot_highs, pivot_lows
+
+
+
+
+def detect_pivot_highs_lows_bounded(
+    candles: Any,
+    start_idx: int,
+    end_idx: int,
+    lookback: int = 5
+) -> Tuple[List[int], List[int]]:
+    """Detect pivot high and low points in bounded window (no slicing)
+    
+    OPTIMIZED version that works on bounded indices without creating slices.
+    
+    Args:
+        candles: Full OHLC candle list (not sliced)
+        start_idx: Start of window (inclusive)
+        end_idx: End of window (exclusive)
+        lookback: Number of candles to look back/forward for confirmation
+    
+    Returns:
+        Tuple of (pivot_high_indices, pivot_low_indices) - absolute indices in candles
+    """
+    pivot_highs = []
+    pivot_lows = []
+    
+    # Validate window
+    if start_idx < 0 or end_idx > len(candles) or start_idx >= end_idx:
+        return pivot_highs, pivot_lows
+    
+    # Need at least lookback*2 + 1 candles in window
+    window_size = end_idx - start_idx
+    if window_size < lookback * 2 + 1:
+        return pivot_highs, pivot_lows
+    
+    # Scan for pivots in window (cannot detect in first/last 'lookback' candles of window)
+    for i in range(start_idx + lookback, end_idx - lookback):
+        current_high = candles[i]['high']
+        current_low = candles[i]['low']
+        
+        # Check for pivot high
+        is_pivot_high = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['high'] >= current_high or candles[i + j]['high'] >= current_high:
+                is_pivot_high = False
+                break
+        
+        if is_pivot_high:
+            pivot_highs.append(i)
+        
+        # Check for pivot low
+        is_pivot_low = True
+        for j in range(1, lookback + 1):
+            # Check both left and right sides
+            if candles[i - j]['low'] <= current_low or candles[i + j]['low'] <= current_low:
+                is_pivot_low = False
+                break
+        
+        if is_pivot_low:
+            pivot_lows.append(i)
+    
+    return pivot_highs, pivot_lows
+
+
+
+
