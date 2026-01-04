@@ -1439,9 +1439,6 @@ def check_intrabar_exit(
 
 
 def manage_trade_plan(
-
-
-def manage_trade_plan(
     trade_plan: TradePlan,
     current_price: float,
     parameters: SupplyDemandParameters
@@ -1495,9 +1492,6 @@ def manage_trade_plan(
 # Helper Functions
 # ============================================================================
 
-def calculate_r_multiple(
-
-
 def calculate_trading_costs(
     price: float,
     position_size: float,
@@ -1522,9 +1516,6 @@ def calculate_trading_costs(
     total_bps = fees_bps + slippage_bps
     cost = (price * position_size * total_bps) / 10000.0
     return cost
-
-
-def check_limit_order_fill(
 
 
 def check_limit_order_fill(
@@ -1607,9 +1598,6 @@ def check_limit_order_fill(
         return True
     
     return False
-
-
-def calculate_pnl_with_costs(
 
 
 def calculate_pnl_with_costs(
