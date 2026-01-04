@@ -409,6 +409,7 @@ class DecisionFunnel:
     candidates_scored: int = 0   # Candidates that passed gating and were scored
     rejected_min_setup_score: int = 0
     rejected_min_reward_risk: int = 0
+    rejected_proximity: int = 0  # Rejected by proximity trigger (price too far from zone)
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
@@ -1482,6 +1483,14 @@ def execute_backtest_for_symbol(
             for zone_id, zone in active_zones.items():
                 # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
+                # PROXIMITY TRIGGER: Skip zones that were just created
+                # Zones need time to "cool off" before we consider placing orders
+                # This prevents placing orders at zone creation (not a retest)
+                zone_age = ltf_idx - zone.created_at
+                min_zone_age = 5  # Minimum bars before zone is eligible for order placement
+                if zone_age < min_zone_age:
+                    continue  # Zone too young, skip
+                
                 # Check if we already have a pending order or position for this zone
                 zone_already_traded = any(
                     p.zone == zone for p in pending_plans + open_positions
@@ -1591,6 +1600,49 @@ def execute_backtest_for_symbol(
                 if score < params.min_setup_score:
                     funnel.rejected_min_setup_score += 1
                     continue
+                
+                # PROXIMITY TRIGGER: Only place orders when price is near the zone
+                # This prevents placing orders immediately after zone creation
+                # Orders should be placed when price returns to test the zone
+                
+                # Calculate zone width
+                zone_width = abs(zone.distal - zone.proximal)
+                
+                # Determine entry price (limit price where order will be placed)
+                # For DEMAND (LONG): entry at proximal (buy when price drops to zone)
+                # For SUPPLY (SHORT): entry at proximal (sell when price rises to zone)
+                limit_price = zone.proximal
+                
+                # Calculate distance from current price to limit price
+                distance_to_entry = abs(current_price - limit_price)
+                
+                # Calculate proximity threshold
+                proximity_threshold = max(
+                    params.entry_proximity_abs,
+                    params.entry_proximity_zone_width_mult * zone_width
+                )
+                
+                # Check if price is within proximity threshold
+                if distance_to_entry > proximity_threshold:
+                    funnel.rejected_proximity += 1
+                    continue
+                
+                # Optional: Check if price is on correct side and approaching
+                if params.require_price_on_correct_side:
+                    if zone_polarity_now == ZoneType.DEMAND:
+                        # For DEMAND (LONG), price should be above zone (can drop into it)
+                        # We want to place when price is near but hasn't fully entered yet
+                        if current_price < zone.distal:
+                            # Price is below the zone entirely, skip
+                            funnel.rejected_proximity += 1
+                            continue
+                    else:  # SUPPLY
+                        # For SUPPLY (SHORT), price should be below zone (can rise into it)
+                        # We want to place when price is near but hasn't fully entered yet
+                        if current_price > zone.distal:
+                            # Price is above the zone entirely, skip
+                            funnel.rejected_proximity += 1
+                            continue
                 
                 # Build trade plan
                 plan = build_trade_plan(
@@ -2624,6 +2676,7 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
             'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
             'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
+            'rejected_proximity': sum(f.rejected_proximity for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
@@ -2689,7 +2742,9 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     if agg['rejected_min_setup_score'] > 0:
         print(f"  ├─ Rejected (Min Score):   {agg['rejected_min_setup_score']}")
     if agg['rejected_min_reward_risk'] > 0:
-        print(f"  └─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
+        print(f"  ├─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
+    if agg.get('rejected_proximity', 0) > 0:
+        print(f"  └─ Rejected (Proximity):   {agg['rejected_proximity']}")
     print(f"Orders Placed:               {agg['orders_placed']}")
     print(f"  ├─ Filled:                 {agg['orders_filled']}")
     print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")

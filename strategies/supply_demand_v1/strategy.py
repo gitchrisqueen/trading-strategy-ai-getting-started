@@ -143,6 +143,11 @@ class SupplyDemandParameters:
     max_retries_per_zone: int = 1  # Maximum order placement attempts per zone (default 1 = no retries)
     rearm_requires_price_reset: bool = True  # Require price to move away from zone before retry
     rearm_price_buffer_pct: float = 0.005  # Price must move beyond proximal + 0.5% to rearm
+    
+    # Entry Proximity Trigger (place orders only when price is near zone)
+    entry_proximity_zone_width_mult: float = 0.5  # Place when within 0.5x zone width
+    entry_proximity_abs: float = 0.0  # Optional absolute proximity threshold (0 = disabled)
+    require_price_on_correct_side: bool = True  # Only place when price on correct side of zone
 
 
 @dataclass
