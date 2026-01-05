@@ -48,8 +48,12 @@ timeframes:
 # Refinement Params
 rtf_refinement:
   enabled: true
-  rule: "rejection"  # or "engulfing" or "micro_break"
+  rule: "rejection" # "rejection" or # or "engulfing" or "micro_break"
   lookback: 2
+
+zone_attempts:
+  max_attempts: 2        # No retries (default)
+  cooldown_bars: 48    # Permanent disable
 
 # Candle classification
 candle_classification:
@@ -95,7 +99,7 @@ mtf_gating:
 # Entry configuration
 entry:
   entry_mode: "limit"  # "limit" or "confirmation"
-  ttl_bars: 10         # Time-to-live for limit orders
+  ttl_bars: 30         # Time-to-live for limit orders
 
 # Trading costs
 costs:

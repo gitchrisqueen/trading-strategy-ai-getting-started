@@ -186,9 +186,7 @@ class TradePlan:
     actual_entry_price: Optional[float] = None
     entry_cost: float = 0.0
     exit_cost: float = 0.0
-    reward_amount: float
-    r_multiple: float
-    score: float
+
 
 
 # ============================================================================
