@@ -141,6 +141,62 @@ def make_zone_id(symbol: str, zone: Zone) -> str:
     return f"{symbol}_{zone.created_at}_{zone_type_str}_{zone.proximal}_{zone.distal}"
 
 
+def validate_timeframe_hierarchy(ltf_tf: str, rtf_tf: Optional[str]) -> None:
+    """Validate that RTF is a lower timeframe than LTF
+    
+    RTF (Refining TimeFrame) must be LOWER (smaller interval) than LTF (Lower TimeFrame).
+    This ensures that RTF provides finer-grained price action for entry refinement.
+    
+    Args:
+        ltf_tf: Lower timeframe string (e.g., '15m', '1h')
+        rtf_tf: Refining timeframe string (e.g., '5m', '1m') or None
+    
+    Raises:
+        ValueError: If rtf_tf is greater than or equal to ltf_tf
+    
+    Example:
+        validate_timeframe_hierarchy('15m', '5m')   # OK - 5m < 15m
+        validate_timeframe_hierarchy('15m', '15m')  # ERROR - equal
+        validate_timeframe_hierarchy('15m', '1h')   # ERROR - 1h > 15m
+    """
+    if rtf_tf is None:
+        return  # RTF is optional, None is valid
+    
+    # Timeframe to minutes mapping
+    tf_to_minutes = {
+        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '2h': 120, '4h': 240, '6h': 360,
+        '12h': 720, '1d': 1440,
+    }
+    
+    # Get minutes for each timeframe
+    ltf_minutes = tf_to_minutes.get(ltf_tf)
+    rtf_minutes = tf_to_minutes.get(rtf_tf)
+    
+    # Validate that both timeframes are recognized
+    if ltf_minutes is None:
+        raise ValueError(
+            f"Invalid LTF timeframe: '{ltf_tf}'. "
+            f"Must be one of: {', '.join(sorted(tf_to_minutes.keys()))}"
+        )
+    
+    if rtf_minutes is None:
+        raise ValueError(
+            f"Invalid RTF timeframe: '{rtf_tf}'. "
+            f"Must be one of: {', '.join(sorted(tf_to_minutes.keys()))}"
+        )
+    
+    # Validate that RTF < LTF
+    if rtf_minutes >= ltf_minutes:
+        raise ValueError(
+            f"Invalid timeframe configuration: RTF ('{rtf_tf}' = {rtf_minutes}m) must be "
+            f"LOWER than LTF ('{ltf_tf}' = {ltf_minutes}m). "
+            f"RTF is used for entry refinement and must provide finer-grained price action. "
+            f"Valid RTF options for LTF='{ltf_tf}': "
+            f"{', '.join(tf for tf, mins in sorted(tf_to_minutes.items(), key=lambda x: x[1]) if mins < ltf_minutes)}"
+        )
+
+
 # ============================================================================
 # Multi-Timeframe Timestamp Mapping
 # ============================================================================
@@ -2309,6 +2365,9 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         max_attempts_per_zone=config.get('zone_attempts', {}).get('max_attempts', 1),
         cooldown_bars=config.get('zone_attempts', {}).get('cooldown_bars', None),
     )
+    
+    # Validate timeframe hierarchy: RTF must be lower than LTF
+    validate_timeframe_hierarchy(params.ltf_tf, params.rtf_tf)
     
     # Check if parallel execution is enabled
     parallel_config = config.get('parallel', {})
