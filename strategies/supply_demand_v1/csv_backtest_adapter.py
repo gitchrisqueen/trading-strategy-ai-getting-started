@@ -2066,6 +2066,9 @@ def run_symbol_backtest(
             'timeframe_ltf': config['timeframes']['ltf'],
             'timeframe_itf': config['timeframes']['itf'],
             'timeframe_htf': config['timeframes']['htf'],
+            # For synthetic data, used window equals available window
+            'used_first_ts': ltf_candles[0]['timestamp'].isoformat() if ltf_candles else None,
+            'used_last_ts': ltf_candles[-1]['timestamp'].isoformat() if ltf_candles else None,
         }
         
         # Calculate metrics
