@@ -1874,7 +1874,7 @@ def check_rtf_refinement(
     zone: Zone,
     polarity: ZoneType,
     parameters: SupplyDemandParameters
-) -> bool:
+) -> Tuple[bool, Optional[str]]:
     """Check if RTF entry refinement criteria are met
     
     This is the main RTF refinement function that checks if a zone setup
@@ -1889,10 +1889,13 @@ def check_rtf_refinement(
         parameters: Strategy parameters with rtf_refinement settings
     
     Returns:
-        True if refinement passes (allow order placement), False otherwise
+        Tuple of (passed: bool, failure_reason: Optional[str])
+        - passed: True if refinement passes (allow order placement), False otherwise
+        - failure_reason: Reason for failure if passed is False, None otherwise
+          Possible reasons: "insufficient_candles", "rejection_rule", "wrong_side"
     
     Behavior:
-        - If rtf_refinement_enabled is False: always return True (no filtering)
+        - If rtf_refinement_enabled is False: always return (True, None) (no filtering)
         - If enabled: check the configured rule (engulfing, rejection, micro_break)
         - Direction-aware: LONG logic for DEMAND polarity, SHORT logic for SUPPLY polarity
     
@@ -1903,15 +1906,15 @@ def check_rtf_refinement(
     """
     # If refinement is disabled, always pass
     if not parameters.rtf_refinement_enabled:
-        return True
+        return True, None
     
     # Need at least 1 previous candle for all rules
     if current_idx < 1:
-        return False
+        return False, "insufficient_candles"
     
     # Ensure we have enough candles for lookback
     if current_idx < parameters.rtf_refinement_lookback:
-        return False
+        return False, "insufficient_candles"
     
     # Determine if this is a LONG or SHORT setup based on current polarity
     is_long = polarity == ZoneType.DEMAND
@@ -1931,22 +1934,25 @@ def check_rtf_refinement(
     
     if rule == "engulfing":
         if is_long:
-            return check_bullish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
+            passed = check_bullish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
         else:
-            return check_bearish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
+            passed = check_bearish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
+        return (True, None) if passed else (False, "rejection_rule")
     
     elif rule == "rejection":
         if is_long:
-            return check_bullish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+            passed = check_bullish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
         else:
-            return check_bearish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+            passed = check_bearish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+        return (True, None) if passed else (False, "rejection_rule")
     
     elif rule == "micro_break":
         if is_long:
-            return check_bullish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
+            passed = check_bullish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
         else:
-            return check_bearish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
+            passed = check_bearish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
+        return (True, None) if passed else (False, "rejection_rule")
     
     else:
         # Unknown rule, fail refinement
-        return False
+        return False, "rejection_rule"

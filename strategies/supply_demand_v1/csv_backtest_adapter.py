@@ -461,6 +461,12 @@ class DecisionFunnel:
     zones_fresh_ltf: int = 0     # LTF zones that are fresh at START of simulation
     zones_fresh_htf: int = 0     # HTF zones that are fresh at START of simulation
     zones_fresh_final: int = 0   # LTF zones that are fresh at END of simulation
+    
+    # NEW: Explicit CSV-based fresh counts (PR requirement A)
+    zones_fresh_csv: int = 0           # Count from zones.csv where is_fresh==True (never touched)
+    zones_fresh_final_csv: int = 0     # Count from zones.csv where final_is_fresh==True (fresh at end)
+    zones_active_fresh_end: int = 0    # Count of active zones that are fresh at end
+    
     rejected_curve: int = 0      # Rejected by curve gating
     rejected_trend: int = 0      # Rejected by trend gating
     candidates_scored: int = 0   # Candidates that passed gating and were scored
@@ -470,6 +476,12 @@ class DecisionFunnel:
     refinement_attempts: int = 0  # Attempts at RTF entry refinement
     refinement_pass: int = 0      # Refinement passed (order placed)
     refinement_fail: int = 0      # Refinement failed (no order placed)
+    
+    # NEW: Refinement failure reasons (PR requirement C)
+    refinement_fail_rejection_rule: int = 0       # Failed pattern match (engulfing/rejection/micro_break)
+    refinement_fail_insufficient_candles: int = 0 # Not enough lookback candles
+    refinement_fail_wrong_side: int = 0           # Price on wrong side of zone
+    
     zones_attempted: int = 0      # Zones that had at least one order attempt
     zones_disabled_by_attempts: int = 0  # Zones disabled due to max attempts reached
     orders_placed: int = 0
@@ -1623,12 +1635,16 @@ def execute_backtest_for_symbol(
                             # Price has reset, clear the needs_reset flag
                             zone_price_rearm_state[zone_id]['needs_reset'] = False
                 
-                # Apply MTF gating BEFORE scoring (performance optimization)
+                # === REORDERED PIPELINE (PR requirement B) ===
+                # New order: curve/trend gating → proximity → scoring → refinement → order
+                # This avoids expensive scoring for zones that fail cheap proximity checks
+                
+                # STEP 1: Apply MTF gating (cheap per-zone check)
                 # Convert curve and trend to string format for should_allow_trade
                 curve_str = enum_to_string(curve_state)
                 trend_str = enum_to_string(trend_state)
                 
-                # Placeholder score for gating check (we'll compute actual score after gating)
+                # Placeholder score for gating check (we'll compute actual score after proximity+gating)
                 base_score = 0.0
                 
                 # Check if trade should be allowed based on curve + trend gating
@@ -1650,46 +1666,10 @@ def execute_backtest_for_symbol(
                         funnel.rejected_trend += 1
                     continue
                 
-                # Passed gating - now score the zone
-                # Find opposing zone (nearest fresh zone of opposite type)
-                # Use dynamic polarity for zone type determination
+                # STEP 2: PROXIMITY TRIGGER (cheap per-candle check) - MOVED BEFORE SCORING
+                # Only evaluate zones when price is near them
+                # This prevents expensive scoring for distant zones
                 zone_polarity_now = get_zone_polarity_at_idx(zone, ltf_idx)
-                
-                opposing_zone = None
-                if zone_polarity_now == ZoneType.DEMAND:
-                    # Find nearest fresh supply above
-                    for z in ltf_zones:
-                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
-                        if z_polarity == ZoneType.SUPPLY and z.proximal > current_price:
-                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
-                                if opposing_zone is None or z.proximal < opposing_zone.proximal:
-                                    opposing_zone = z
-                else:  # SUPPLY
-                    # Find nearest fresh demand below
-                    for z in ltf_zones:
-                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
-                        if z_polarity == ZoneType.DEMAND and z.proximal < current_price:
-                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
-                                if opposing_zone is None or z.proximal > opposing_zone.proximal:
-                                    opposing_zone = z
-                
-                score = odds_enhancer_score(
-                    zone,
-                    current_price,
-                    curve_state,
-                    trend_state,
-                    params,
-                    opposing_zone
-                )
-                funnel.candidates_scored += 1
-                
-                if score < params.min_setup_score:
-                    funnel.rejected_min_setup_score += 1
-                    continue
-                
-                # PROXIMITY TRIGGER: Only place orders when price is near the zone
-                # This prevents placing orders immediately after zone creation
-                # Orders should be placed when price returns to test the zone
                 
                 # Calculate zone width
                 zone_width = abs(zone.distal - zone.proximal)
@@ -1730,20 +1710,67 @@ def execute_backtest_for_symbol(
                             funnel.rejected_proximity += 1
                             continue
                 
-                # RTF ENTRY REFINEMENT: Check if refinement criteria are met
-                # This runs AFTER proximity trigger passes, BEFORE order placement
+                # STEP 3: SCORING (expensive - only if proximity passes)
+                # Find opposing zone (nearest fresh zone of opposite type)
+                # Use dynamic polarity for zone type determination
+                opposing_zone = None
+                if zone_polarity_now == ZoneType.DEMAND:
+                    # Find nearest fresh supply above
+                    for z in ltf_zones:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.SUPPLY and z.proximal > current_price:
+                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
+                                if opposing_zone is None or z.proximal < opposing_zone.proximal:
+                                    opposing_zone = z
+                else:  # SUPPLY
+                    # Find nearest fresh demand below
+                    for z in ltf_zones:
+                        z_polarity = get_zone_polarity_at_idx(z, ltf_idx)
+                        if z_polarity == ZoneType.DEMAND and z.proximal < current_price:
+                            if z.created_at < ltf_idx and is_zone_fresh_at_idx(z, ltf_idx):
+                                if opposing_zone is None or z.proximal > opposing_zone.proximal:
+                                    opposing_zone = z
+                
+                score = odds_enhancer_score(
+                    zone,
+                    current_price,
+                    curve_state,
+                    trend_state,
+                    params,
+                    opposing_zone
+                )
+                funnel.candidates_scored += 1
+                
+                if score < params.min_setup_score:
+                    funnel.rejected_min_setup_score += 1
+                    continue
+                
+                # STEP 4: RTF ENTRY REFINEMENT (only if score passes)
+                # Check if refinement criteria are met
                 # If refinement fails, skip order but keep zone active for future attempts
                 funnel.refinement_attempts += 1
                 
-                if not check_rtf_refinement(
+                # Updated to handle tuple return: (passed, failure_reason)
+                refinement_passed, failure_reason = check_rtf_refinement(
                     ltf_candles,
                     ltf_idx,
                     zone,
                     zone_polarity_now,
                     params
-                ):
-                    # Refinement failed - skip order placement but keep zone active
+                )
+                
+                if not refinement_passed:
+                    # Refinement failed - track reason and skip order placement
                     funnel.refinement_fail += 1
+                    
+                    # Track specific failure reason (PR requirement C)
+                    if failure_reason == "insufficient_candles":
+                        funnel.refinement_fail_insufficient_candles += 1
+                    elif failure_reason == "rejection_rule":
+                        funnel.refinement_fail_rejection_rule += 1
+                    elif failure_reason == "wrong_side":
+                        funnel.refinement_fail_wrong_side += 1
+                    
                     continue
                 
                 # Refinement passed (or disabled) - proceed with order placement
@@ -1879,6 +1906,25 @@ def execute_backtest_for_symbol(
     # Calculate zones_fresh_final: count zones that are fresh at END of simulation
     end_idx = len(ltf_candles) - 1
     funnel.zones_fresh_final = sum(1 for z in ltf_zones if is_zone_fresh_at_idx(z, end_idx))
+    
+    # === PR REQUIREMENT A: Calculate CSV-based fresh counts ===
+    # These will be compared against zones.csv to validate correctness
+    # Count from zone_dicts (which will be written to zones.csv)
+    # We'll compute them here first, then use them again when building zone_dicts
+    
+    # Count zones where is_fresh==True (never touched during entire simulation)
+    # is_fresh is inverted from ever_touched: is_fresh = not ever_touched
+    zones_never_touched = [z for z in ltf_zones if not z.ever_touched]
+    funnel.zones_fresh_csv = len(zones_never_touched)
+    
+    # Count zones that are fresh at END (final_is_fresh==True)
+    zones_fresh_at_end = [z for z in ltf_zones if is_zone_fresh_at_idx(z, end_idx)]
+    funnel.zones_fresh_final_csv = len(zones_fresh_at_end)
+    
+    # Track active zones that are still fresh at end (for observability)
+    # Active = created and not disabled
+    active_zones_at_end = [z for z in ltf_zones if z.created_at <= end_idx and not z.disabled]
+    funnel.zones_active_fresh_end = sum(1 for z in active_zones_at_end if is_zone_fresh_at_idx(z, end_idx))
     
     # DECISION FUNNEL: Recompute counts from final order_registry state
     # This ensures funnel matches orders.csv and prevents mismatches
@@ -2834,6 +2880,12 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'zones_fresh_ltf': sum(f.zones_fresh_ltf for f in result.decision_funnels),
             'zones_fresh_htf': sum(f.zones_fresh_htf for f in result.decision_funnels),
             'zones_fresh_final': sum(f.zones_fresh_final for f in result.decision_funnels),
+            
+            # === PR REQUIREMENT A: Explicit CSV-based fresh counts ===
+            'zones_fresh_csv': sum(f.zones_fresh_csv for f in result.decision_funnels),
+            'zones_fresh_final_csv': sum(f.zones_fresh_final_csv for f in result.decision_funnels),
+            'zones_active_fresh_end': sum(f.zones_active_fresh_end for f in result.decision_funnels),
+            
             'rejected_curve': sum(f.rejected_curve for f in result.decision_funnels),
             'rejected_trend': sum(f.rejected_trend for f in result.decision_funnels),
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
@@ -2843,6 +2895,12 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'refinement_attempts': sum(f.refinement_attempts for f in result.decision_funnels),
             'refinement_pass': sum(f.refinement_pass for f in result.decision_funnels),
             'refinement_fail': sum(f.refinement_fail for f in result.decision_funnels),
+            
+            # === PR REQUIREMENT C: Refinement failure reasons ===
+            'refinement_fail_rejection_rule': sum(f.refinement_fail_rejection_rule for f in result.decision_funnels),
+            'refinement_fail_insufficient_candles': sum(f.refinement_fail_insufficient_candles for f in result.decision_funnels),
+            'refinement_fail_wrong_side': sum(f.refinement_fail_wrong_side for f in result.decision_funnels),
+            
             'zones_attempted': sum(f.zones_attempted for f in result.decision_funnels),
             'zones_disabled_by_attempts': sum(f.zones_disabled_by_attempts for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
