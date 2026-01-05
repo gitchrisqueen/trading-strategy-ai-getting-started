@@ -51,6 +51,7 @@ rtf_refinement:
   rule: "rejection" # "rejection" or # or "engulfing" or "micro_break"
   lookback: 2
 
+# Zone Attempt settings (optional)
 zone_attempts:
   max_attempts: 2        # No retries (default)
   cooldown_bars: 48    # Permanent disable

@@ -49,6 +49,7 @@ parallel:
   chunk_size: 2   # Symbols per chunk (default: 2)
   fail_fast: false # Stop on first error (default: true)
 
+# Zone Attempt settings (optional)
 zone_attempts:
   max_attempts: 2        # No retries (default)
   cooldown_bars: 48    # Permanent disable
