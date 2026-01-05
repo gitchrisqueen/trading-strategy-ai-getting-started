@@ -2659,7 +2659,9 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
                 'symbol', 'zone_type', 'proximal', 'distal',
                 'created_at', 'base_len', 'legout_len', 'legout_return',
                 'freshness_touches', 'first_touch_idx', 'ever_touched', 
-                'final_is_fresh', 'is_fresh'  # is_fresh kept for backward compat
+                'final_is_fresh', 'is_fresh',  # is_fresh kept for backward compat
+                'original_type', 'final_polarity_type', 'flip_count', 'last_flip_idx',
+                'attempts', 'last_attempt_idx', 'disabled'  # Attempt tracking fields
             ]
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
