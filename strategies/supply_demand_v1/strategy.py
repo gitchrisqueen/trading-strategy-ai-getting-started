@@ -148,6 +148,11 @@ class SupplyDemandParameters:
     entry_proximity_zone_width_mult: float = 0.5  # Place when within 0.5x zone width
     entry_proximity_abs: float = 0.0  # Optional absolute proximity threshold (0 = disabled)
     require_price_on_correct_side: bool = True  # Only place when price on correct side of zone
+    
+    # RTF Entry Refinement Configuration
+    rtf_refinement_enabled: bool = False  # Enable RTF entry refinement stage
+    rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
+    rtf_refinement_lookback: int = 2  # Number of candles for refinement context
 
 
 @dataclass

@@ -1,9 +1,9 @@
-# Supply & Demand V1 - Default Experiment Configuration
-# This configuration runs a basic backtest on a small set of symbols
+# Supply & Demand V1 - RTF Refinement Test Configuration
+# This configuration tests the RTF entry refinement stage
 
 # Experiment metadata
-name: "sd_v1_default"
-description: "Default S&D V1 backtest with 5 symbols"
+name: "sd_v1_rtf_test"
+description: "S&D V1 with RTF refinement enabled (engulfing rule)"
 
 # Data source
 data_source: "synthetic"  # or "historical"
@@ -75,9 +75,9 @@ entry:
 
 # RTF Entry Refinement (optional)
 # Refines entry timing after proximity trigger passes
-# Disabled by default to preserve existing behavior
+# Enabled for this test to validate refinement functionality
 rtf_refinement:
-  enabled: false         # Enable RTF entry refinement stage
+  enabled: true          # Enable RTF entry refinement stage
   rule: "engulfing"      # "engulfing", "rejection", or "micro_break"
   lookback: 2            # Number of candles for refinement context
 
