@@ -263,7 +263,7 @@ def test_check_rtf_refinement_engulfing_long():
     params = SupplyDemandParameters(
         rtf_refinement_enabled=True,
         rtf_refinement_rule="engulfing",
-        rtf_refinement_lookback=2
+        rtf_refinement_lookback=1  # Only need 1 previous candle for engulfing
     )
     
     # Bullish engulfing pattern
@@ -296,7 +296,7 @@ def test_check_rtf_refinement_engulfing_short():
     params = SupplyDemandParameters(
         rtf_refinement_enabled=True,
         rtf_refinement_rule="engulfing",
-        rtf_refinement_lookback=2
+        rtf_refinement_lookback=1  # Only need 1 previous candle for engulfing
     )
     
     # Bearish engulfing pattern
@@ -329,7 +329,7 @@ def test_check_rtf_refinement_micro_break_long():
     params = SupplyDemandParameters(
         rtf_refinement_enabled=True,
         rtf_refinement_rule="micro_break",
-        rtf_refinement_lookback=2
+        rtf_refinement_lookback=1  # Only need 1 previous candle for micro_break
     )
     
     candles = [
@@ -392,7 +392,7 @@ def test_check_rtf_refinement_unknown_rule():
     params = SupplyDemandParameters(
         rtf_refinement_enabled=True,
         rtf_refinement_rule="unknown_rule",
-        rtf_refinement_lookback=2
+        rtf_refinement_lookback=1  # Use lookback=1 to avoid insufficient_candles error
     )
     
     candles = [
@@ -426,9 +426,18 @@ def test_check_rtf_refinement_unknown_rule():
 
 def test_check_bullish_rejection_with_relaxed_wick_ratio():
     """Test bullish rejection with relaxed wick ratio threshold"""
+    # Create candle with 35% wick ratio
+    # open=100, low=90, close=107
+    # range = 110 - 90 = 20
+    # lower_wick = min(100, 107) - 90 = 10
+    # WRONG - this gives 50% wick!
+    # We need: lower_wick = 7 for 35% ratio
+    # So: min(open, close) - low = 7  =>  min(open, close) = 97
+    # We want close=107, so open must be 97 or less
+    
     candles = [
-        # Candle with 30% wick ratio (would fail default 40%)
-        {'open': 100, 'high': 110, 'low': 90, 'close': 107},  # range=20, wick=7, ratio=0.35
+        # Candle with 35% wick ratio: range=20, wick=7 (97-90), ratio=0.35
+        {'open': 97, 'high': 110, 'low': 90, 'close': 107},
     ]
     
     zone_bottom = 90
@@ -438,7 +447,7 @@ def test_check_bullish_rejection_with_relaxed_wick_ratio():
     passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, min_wick_ratio=0.40)
     assert passed is False
     assert debug_info["reason"] == "wick_too_small"
-    assert debug_info["wick_ratio"] < 0.40
+    assert 0.34 < debug_info["wick_ratio"] < 0.36  # Should be ~0.35
     
     # Should pass with relaxed min_wick_ratio=0.30
     passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, min_wick_ratio=0.30)
@@ -448,39 +457,41 @@ def test_check_bullish_rejection_with_relaxed_wick_ratio():
 
 def test_check_bullish_rejection_with_strict_body_ratio():
     """Test bullish rejection with strict body ratio threshold"""
-    candles = [
-        # Candle with 55% body ratio (would pass default 50% max)
-        {'open': 100, 'high': 110, 'low': 90, 'close': 101},  # range=20, body=1, close_pos=0.55
+    # We need a candle where:
+    # - body_ratio > 0.50 (large body)
+    # - wick_ratio >= 0.40 (sufficient wick to pass that check)
+    # - close_position >= 0.5 (close in upper half)
+    # Example: open=95, low=90, close=108, high=110
+    # range = 20, body = 13, body_ratio = 0.65
+    # lower_wick = 95 - 90 = 5, wick_ratio = 0.25 - FAILS wick check
+    
+    # Let me design correctly:
+    # We want body_ratio = 0.55 and wick_ratio = 0.40
+    # range = 20, so body = 11, wick = 8
+    # If low = 90, then min(open, close) = 90 + 8 = 98
+    # close must be > 100 (mid-range) for close_position
+    # So close = 107, open = 98 (this gives body = 9, not 11)
+    # Try: close = 109, open = 98 -> body = 11, wick = 8
+    
+    candles_large_body = [
+        # range=20 (90 to 110), body=11 (98 to 109), lower_wick=8 (90 to 98)
+        # body_ratio = 11/20 = 0.55, wick_ratio = 8/20 = 0.40
+        {'open': 98, 'high': 110, 'low': 90, 'close': 109},
     ]
     
     zone_bottom = 90
     zone_top = 95
     
-    # Calculate actual values for this candle
-    # range = 110 - 90 = 20
-    # body = |101 - 100| = 1
-    # lower_wick = min(100, 101) - 90 = 10
-    # wick_ratio = 10 / 20 = 0.50 (passes default 0.40)
-    # body_ratio = 1 / 20 = 0.05 (passes default 0.50)
-    # close_position = (101 - 90) / 20 = 0.55 (passes 0.5)
-    
-    # This should pass with default parameters
-    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
-    assert passed is True
-    
-    # Create a candle that actually has a large body
-    candles_large_body = [
-        {'open': 95, 'high': 110, 'low': 90, 'close': 106},  # range=20, body=11, body_ratio=0.55
-    ]
-    
-    # Should pass with default max_body_ratio=0.50 (actually 0.55 > 0.50, so should fail)
+    # Should fail with default max_body_ratio=0.50 (body_ratio=0.55 > 0.50)
     passed, debug_info = check_bullish_rejection(candles_large_body, 0, zone_bottom, zone_top, lookback=2, max_body_ratio=0.50)
     assert passed is False
     assert debug_info["reason"] == "body_too_large"
+    assert 0.54 < debug_info["body_ratio"] < 0.56  # Should be ~0.55
     
     # Should pass with relaxed max_body_ratio=0.60
     passed, debug_info = check_bullish_rejection(candles_large_body, 0, zone_bottom, zone_top, lookback=2, max_body_ratio=0.60)
     assert passed is True
+    assert debug_info is None
 
 
 def test_check_bullish_rejection_without_touch_zone_requirement():
@@ -510,7 +521,7 @@ def test_check_rtf_refinement_rejection_with_custom_params():
     params = SupplyDemandParameters(
         rtf_refinement_enabled=True,
         rtf_refinement_rule="rejection",
-        rtf_refinement_lookback=2,
+        rtf_refinement_lookback=1,  # Only need 1 candle for lookback
         # Relaxed parameters
         rejection_min_wick_ratio=0.30,  # Lower than default 0.40
         rejection_max_body_ratio=0.60,  # Higher than default 0.50
@@ -519,8 +530,12 @@ def test_check_rtf_refinement_rejection_with_custom_params():
     )
     
     # Candle with 35% wick ratio (passes relaxed 0.30, would fail default 0.40)
+    # range=20 (90 to 110), lower_wick=7 (90 to 97), wick_ratio=0.35
+    # close=107 -> close_position = (107-90)/20 = 0.85 (passes)
+    # body=10 (97 to 107), body_ratio=0.50 (passes 0.60)
     candles = [
-        {'open': 100, 'high': 110, 'low': 90, 'close': 107},
+        {'open': 100, 'high': 102, 'low': 98, 'close': 99},  # Previous candle (needed for lookback)
+        {'open': 97, 'high': 110, 'low': 90, 'close': 107},  # Test candle
     ]
     
     zone = Zone(
@@ -535,8 +550,8 @@ def test_check_rtf_refinement_rejection_with_custom_params():
         legout_len=1,
     )
     
-    # Should pass with relaxed parameters
-    passed, failure_reason, debug_info = check_rtf_refinement(candles, 0, zone, ZoneType.DEMAND, params)
+    # Should pass with relaxed parameters (test candle is at index 1)
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params)
     assert passed is True
     assert failure_reason is None
     assert debug_info is None

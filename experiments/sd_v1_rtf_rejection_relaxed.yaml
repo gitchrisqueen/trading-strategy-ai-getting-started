@@ -1,0 +1,89 @@
+# Supply & Demand V1 - RTF Rejection with Relaxed Parameters
+# This config demonstrates configurable rejection refinement parameters
+
+name: "sd_v1_rtf_rejection_relaxed"
+description: "Test relaxed rejection parameters to allow more orders"
+
+data_source: "synthetic"
+
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+
+start_date: "2024-01-01"
+end_date: "2024-01-31"
+
+# Valid timeframe configuration
+timeframes:
+  htf: "4h"
+  itf: "1h"
+  ltf: "15m"
+  rtf: "5m"  # RTF < LTF (5m < 15m)
+
+candle_classification:
+  boring_body_ratio: 0.50
+  exciting_body_ratio: 0.50
+
+zone_detection:
+  min_base_candles: 1
+  max_base_candles: 6
+  min_legout_candles: 1
+  proximal_mode: "body"
+
+scoring:
+  min_setup_score: 6.0
+  freshness_touches_best: 0
+  freshness_touches_good: 1
+  base_time_best: 3
+  base_time_good: 6
+  legout_strength_high_threshold: 0.10
+  legout_strength_mid_threshold: 0.05
+
+trade_management:
+  risk_pct: 0.02
+  breakeven_at_r: 2.0
+  take_profit_at_r: 3.0
+  min_reward_risk: 3.0
+  stop_buffer_pct: 0.001
+
+trend_detection:
+  pivot_len: 5
+  pivots_to_consider: 4
+
+mtf_gating:
+  allow_eq_trades: true
+  eq_requires_trend_alignment: true
+  eq_min_setup_score_bonus: 1.0
+
+entry:
+  entry_mode: "limit"
+  ttl_bars: 10
+
+# === RTF REFINEMENT WITH RELAXED REJECTION PARAMETERS ===
+# These relaxed parameters allow more setups to pass rejection refinement
+rtf_refinement:
+  enabled: true
+  rule: "rejection"  # Use rejection rule (not engulfing or micro_break)
+  lookback: 2
+  
+  # Relaxed rejection parameters (less strict than defaults)
+  rejection_params:
+    min_wick_ratio: 0.30        # Default: 0.40 (30% vs 40%)
+    max_body_ratio: 0.60        # Default: 0.50 (60% vs 50%)
+    require_close_in_direction: true
+    require_touch_zone: true
+
+zone_attempts:
+  max_attempts: 1
+  cooldown_bars: null
+
+costs:
+  fees_bps: 10.0
+  slippage_bps: 5.0
+
+initial_capital: 10000.0
+
+data_generation:
+  num_candles: 500
+  volatility: 0.02
+  seed: 42
