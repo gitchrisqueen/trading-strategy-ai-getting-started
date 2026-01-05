@@ -98,7 +98,7 @@ class TestLimitOrderFillLong:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is True, "Order should be filled when low touches limit"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         assert trade_plan.actual_entry_price is not None
         # Entry price should be limit + slippage
@@ -143,7 +143,7 @@ class TestLimitOrderFillLong:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is False, "Order should not be filled when price never touches"
-        assert trade_plan.order_state == OrderState.PENDING
+        assert trade_plan.order_state.value == "pending"
         assert trade_plan.filled_at_idx is None
         assert trade_plan.actual_entry_price is None
     
@@ -179,7 +179,7 @@ class TestLimitOrderFillLong:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is True, "Order should fill when low exactly equals limit"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
 
 
 class TestLimitOrderFillShort:
@@ -222,7 +222,7 @@ class TestLimitOrderFillShort:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is True, "Order should be filled when high touches limit"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         assert trade_plan.actual_entry_price is not None
         # Entry price should be limit - slippage for short
@@ -262,7 +262,7 @@ class TestLimitOrderFillShort:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is False, "Order should not be filled when price never touches"
-        assert trade_plan.order_state == OrderState.PENDING
+        assert trade_plan.order_state.value == "pending"
         assert trade_plan.filled_at_idx is None
 
 
@@ -309,12 +309,12 @@ class TestTTLCancellation:
         # Check at bar 4 (not expired yet)
         filled = check_limit_order_fill(trade_plan, candles, 4, params)
         assert filled is False
-        assert trade_plan.order_state == OrderState.PENDING
+        assert trade_plan.order_state.value == "pending"
         
         # Check at bar 5 (expired)
         filled = check_limit_order_fill(trade_plan, candles, 5, params)
         assert filled is False
-        assert trade_plan.order_state == OrderState.CANCELLED
+        assert trade_plan.order_state.value == "cancelled"
     
     def test_order_fills_before_ttl_expires(self):
         """Test that order fills normally before TTL expires"""
@@ -354,7 +354,7 @@ class TestTTLCancellation:
         filled = check_limit_order_fill(trade_plan, candles, 3, params)
         
         assert filled is True, "Order should fill before TTL expires"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
     
     def test_no_ttl_order_stays_pending(self):
         """Test that order with no TTL stays pending indefinitely"""
@@ -392,7 +392,7 @@ class TestTTLCancellation:
         # Check at bar 99 - should still be pending
         filled = check_limit_order_fill(trade_plan, candles, 99, params)
         assert filled is False
-        assert trade_plan.order_state == OrderState.PENDING
+        assert trade_plan.order_state.value == "pending"
 
 
 class TestPnLWithCosts:
@@ -615,7 +615,7 @@ class TestWickBasedFills:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is True, "LONG order should fill when wick (low) touches limit, regardless of close"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         # Fill price should be limit (100.0), not the wick low (99)
         assert trade_plan.actual_entry_price is not None
@@ -658,7 +658,7 @@ class TestWickBasedFills:
         filled = check_limit_order_fill(trade_plan, candles, 0, params)
         
         assert filled is True, "SHORT order should fill when wick (high) touches limit, regardless of close"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         assert trade_plan.actual_entry_price is not None
     
@@ -788,7 +788,7 @@ class TestSameCandleFills:
         filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
         
         assert filled is True, "Order should fill on same candle if price touches limit"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == placed_idx
     
     def test_short_same_candle_fill(self):
@@ -835,7 +835,7 @@ class TestSameCandleFills:
         filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
         
         assert filled is True, "Order should fill on same candle if price touches limit"
-        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == placed_idx
     
     def test_no_same_candle_fill_when_price_no_touch(self):
