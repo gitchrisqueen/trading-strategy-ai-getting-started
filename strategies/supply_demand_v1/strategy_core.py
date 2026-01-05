@@ -122,6 +122,10 @@ class SupplyDemandParameters:
     rtf_refinement_enabled: bool = False  # Enable RTF entry refinement stage
     rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
     rtf_refinement_lookback: int = 2  # Number of candles for refinement context
+    
+    # Zone Attempt Tracking & Cooldown
+    max_attempts_per_zone: int = 1  # Maximum order placement attempts per zone (1 = no retries)
+    cooldown_bars: Optional[int] = None  # Cooldown period before allowing retry (None = no cooldown)
 
 
 @dataclass
@@ -166,6 +170,10 @@ class Zone:
     last_checked_idx: int = -1  # Track last checked index for incremental updates
     # DEPRECATED: Use is_zone_fresh_at_idx() for time-relative freshness
     is_fresh: bool = True  # Kept for backward compatibility only
+    # Attempt tracking fields (for preventing excessive re-attempts)
+    attempts: int = 0  # Number of order placement attempts on this zone
+    last_attempt_idx: Optional[int] = None  # Index of most recent attempt
+    disabled: bool = False  # Zone disabled after max attempts reached
 
 
 @dataclass

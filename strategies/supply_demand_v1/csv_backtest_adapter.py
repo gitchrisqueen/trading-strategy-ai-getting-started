@@ -141,6 +141,62 @@ def make_zone_id(symbol: str, zone: Zone) -> str:
     return f"{symbol}_{zone.created_at}_{zone_type_str}_{zone.proximal}_{zone.distal}"
 
 
+def validate_timeframe_hierarchy(ltf_tf: str, rtf_tf: Optional[str]) -> None:
+    """Validate that RTF is a lower timeframe than LTF
+    
+    RTF (Refining TimeFrame) must be LOWER (smaller interval) than LTF (Lower TimeFrame).
+    This ensures that RTF provides finer-grained price action for entry refinement.
+    
+    Args:
+        ltf_tf: Lower timeframe string (e.g., '15m', '1h')
+        rtf_tf: Refining timeframe string (e.g., '5m', '1m') or None
+    
+    Raises:
+        ValueError: If rtf_tf is greater than or equal to ltf_tf
+    
+    Example:
+        validate_timeframe_hierarchy('15m', '5m')   # OK - 5m < 15m
+        validate_timeframe_hierarchy('15m', '15m')  # ERROR - equal
+        validate_timeframe_hierarchy('15m', '1h')   # ERROR - 1h > 15m
+    """
+    if rtf_tf is None:
+        return  # RTF is optional, None is valid
+    
+    # Timeframe to minutes mapping
+    tf_to_minutes = {
+        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '2h': 120, '4h': 240, '6h': 360,
+        '12h': 720, '1d': 1440,
+    }
+    
+    # Get minutes for each timeframe
+    ltf_minutes = tf_to_minutes.get(ltf_tf)
+    rtf_minutes = tf_to_minutes.get(rtf_tf)
+    
+    # Validate that both timeframes are recognized
+    if ltf_minutes is None:
+        raise ValueError(
+            f"Invalid LTF timeframe: '{ltf_tf}'. "
+            f"Must be one of: {', '.join(sorted(tf_to_minutes.keys()))}"
+        )
+    
+    if rtf_minutes is None:
+        raise ValueError(
+            f"Invalid RTF timeframe: '{rtf_tf}'. "
+            f"Must be one of: {', '.join(sorted(tf_to_minutes.keys()))}"
+        )
+    
+    # Validate that RTF < LTF
+    if rtf_minutes >= ltf_minutes:
+        raise ValueError(
+            f"Invalid timeframe configuration: RTF ('{rtf_tf}' = {rtf_minutes}m) must be "
+            f"LOWER than LTF ('{ltf_tf}' = {ltf_minutes}m). "
+            f"RTF is used for entry refinement and must provide finer-grained price action. "
+            f"Valid RTF options for LTF='{ltf_tf}': "
+            f"{', '.join(tf for tf, mins in sorted(tf_to_minutes.items(), key=lambda x: x[1]) if mins < ltf_minutes)}"
+        )
+
+
 # ============================================================================
 # Multi-Timeframe Timestamp Mapping
 # ============================================================================
@@ -414,6 +470,8 @@ class DecisionFunnel:
     refinement_attempts: int = 0  # Attempts at RTF entry refinement
     refinement_pass: int = 0      # Refinement passed (order placed)
     refinement_fail: int = 0      # Refinement failed (no order placed)
+    zones_attempted: int = 0      # Zones that had at least one order attempt
+    zones_disabled_by_attempts: int = 0  # Zones disabled due to max attempts reached
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
@@ -1487,6 +1545,30 @@ def execute_backtest_for_symbol(
             for zone_id, zone in active_zones.items():
                 # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
+                # CHECK IF ZONE IS DISABLED: Skip zones that exceeded max attempts
+                if zone.disabled:
+                    continue  # Zone disabled, skip entirely (no refinement, no scoring)
+                
+                # CHECK COOLDOWN: If cooldown is enabled, allow retry after cooldown period
+                if zone.attempts >= params.max_attempts_per_zone:
+                    if params.cooldown_bars is not None and zone.last_attempt_idx is not None:
+                        # Check if cooldown period has elapsed
+                        bars_since_attempt = ltf_idx - zone.last_attempt_idx
+                        if bars_since_attempt >= params.cooldown_bars:
+                            # Cooldown period elapsed, re-enable zone (reset attempts)
+                            zone.attempts = 0
+                            zone.last_attempt_idx = None
+                            zone.disabled = False
+                        else:
+                            # Still in cooldown, skip
+                            continue
+                    else:
+                        # No cooldown configured, disable zone permanently
+                        if not zone.disabled:
+                            zone.disabled = True
+                            funnel.zones_disabled_by_attempts += 1
+                        continue
+                
                 # PROXIMITY TRIGGER: Skip zones that were just created
                 # Zones need time to "cool off" before we consider placing orders
                 # This prevents placing orders at zone creation (not a retest)
@@ -1684,6 +1766,13 @@ def execute_backtest_for_symbol(
                 # Place order
                 plan.placed_at_idx = ltf_idx
                 
+                # INCREMENT ZONE ATTEMPTS: Track that this zone has an order placed
+                # This happens ONLY when order enters PLACED state, not on refinement attempt
+                if zone.attempts == 0:
+                    funnel.zones_attempted += 1  # First attempt on this zone
+                zone.attempts += 1
+                zone.last_attempt_idx = ltf_idx
+                
                 # Generate unique order ID
                 order_id = f"{symbol}_{order_id_counter}"
                 order_id_counter += 1
@@ -1878,6 +1967,10 @@ def execute_backtest_for_symbol(
             'final_polarity_type': final_polarity.value,
             'flip_count': zone.flip_count,
             'last_flip_idx': zone.last_flip_idx,
+            # Attempt tracking fields
+            'attempts': zone.attempts,
+            'last_attempt_idx': zone.last_attempt_idx,
+            'disabled': zone.disabled,
         })
     
     if enable_profiling:
@@ -2268,7 +2361,13 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         rtf_refinement_enabled=config.get('rtf_refinement', {}).get('enabled', False),
         rtf_refinement_rule=config.get('rtf_refinement', {}).get('rule', 'engulfing'),
         rtf_refinement_lookback=config.get('rtf_refinement', {}).get('lookback', 2),
+        # Zone attempt tracking configuration (with defaults)
+        max_attempts_per_zone=config.get('zone_attempts', {}).get('max_attempts', 1),
+        cooldown_bars=config.get('zone_attempts', {}).get('cooldown_bars', None),
     )
+    
+    # Validate timeframe hierarchy: RTF must be lower than LTF
+    validate_timeframe_hierarchy(params.ltf_tf, params.rtf_tf)
     
     # Check if parallel execution is enabled
     parallel_config = config.get('parallel', {})
@@ -2619,7 +2718,9 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
                 'symbol', 'zone_type', 'proximal', 'distal',
                 'created_at', 'base_len', 'legout_len', 'legout_return',
                 'freshness_touches', 'first_touch_idx', 'ever_touched', 
-                'final_is_fresh', 'is_fresh'  # is_fresh kept for backward compat
+                'final_is_fresh', 'is_fresh',  # is_fresh kept for backward compat
+                'original_type', 'final_polarity_type', 'flip_count', 'last_flip_idx',
+                'attempts', 'last_attempt_idx', 'disabled'  # Attempt tracking fields
             ]
             writer = csv.DictWriter(f, fieldnames=expected_columns)
             writer.writeheader()
@@ -2707,6 +2808,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'refinement_attempts': sum(f.refinement_attempts for f in result.decision_funnels),
             'refinement_pass': sum(f.refinement_pass for f in result.decision_funnels),
             'refinement_fail': sum(f.refinement_fail for f in result.decision_funnels),
+            'zones_attempted': sum(f.zones_attempted for f in result.decision_funnels),
+            'zones_disabled_by_attempts': sum(f.zones_disabled_by_attempts for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
@@ -2779,6 +2882,10 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
         print(f"  ├─ Refinement Attempts:    {agg['refinement_attempts']}")
         print(f"  │  ├─ Passed:              {agg['refinement_pass']}")
         print(f"  │  └─ Failed:              {agg['refinement_fail']}")
+    if agg.get('zones_attempted', 0) > 0:
+        print(f"  ├─ Zones Attempted:        {agg['zones_attempted']}")
+    if agg.get('zones_disabled_by_attempts', 0) > 0:
+        print(f"  ├─ Zones Disabled (Max):   {agg['zones_disabled_by_attempts']}")
     print(f"Orders Placed:               {agg['orders_placed']}")
     print(f"  ├─ Filled:                 {agg['orders_filled']}")
     print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")

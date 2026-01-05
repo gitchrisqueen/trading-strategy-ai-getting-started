@@ -139,8 +139,8 @@ class SupplyDemandParameters:
     # Limit Order Configuration
     ttl_bars: Optional[int] = 10  # Time-to-live in bars for limit orders (None = no expiry)
     
-    # Order Deduplication & Retry Policy
-    max_retries_per_zone: int = 1  # Maximum order placement attempts per zone (default 1 = no retries)
+    # Order Deduplication & Retry Policy (DEPRECATED - replaced by zone attempt tracking)
+    max_retries_per_zone: int = 1  # DEPRECATED - Use max_attempts_per_zone instead
     rearm_requires_price_reset: bool = True  # Require price to move away from zone before retry
     rearm_price_buffer_pct: float = 0.005  # Price must move beyond proximal + 0.5% to rearm
     
@@ -153,6 +153,10 @@ class SupplyDemandParameters:
     rtf_refinement_enabled: bool = False  # Enable RTF entry refinement stage
     rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
     rtf_refinement_lookback: int = 2  # Number of candles for refinement context
+    
+    # Zone Attempt Tracking & Cooldown
+    max_attempts_per_zone: int = 1  # Maximum order placement attempts per zone (1 = no retries)
+    cooldown_bars: Optional[int] = None  # Cooldown period before allowing retry (None = no cooldown)
 
 
 @dataclass
@@ -204,6 +208,10 @@ class Zone:
     last_checked_idx: int = -1  # Track last checked index for incremental updates
     # DEPRECATED: Use is_zone_fresh_at_idx() for time-relative freshness
     is_fresh: bool = True  # Kept for backward compatibility only
+    # Attempt tracking fields (for preventing excessive re-attempts)
+    attempts: int = 0  # Number of order placement attempts on this zone
+    last_attempt_idx: Optional[int] = None  # Index of most recent attempt
+    disabled: bool = False  # Zone disabled after max attempts reached
     # Polarity fields (dynamic zone type)
     original_type: Optional[ZoneType] = None  # Set during initialization
     polarity_type: Optional[ZoneType] = None  # Current polarity (changes over time)
