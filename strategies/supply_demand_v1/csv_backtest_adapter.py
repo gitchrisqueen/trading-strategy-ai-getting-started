@@ -482,6 +482,10 @@ class DecisionFunnel:
     refinement_fail_insufficient_candles: int = 0 # Not enough lookback candles
     refinement_fail_wrong_side: int = 0           # Price on wrong side of zone
     
+    # NEW: Refinement failure debug samples (PR requirement B)
+    # List of first N failures with full context (capped at 25 total per run)
+    refinement_fail_samples: List[Dict[str, Any]] = None
+    
     zones_attempted: int = 0      # Zones that had at least one order attempt
     zones_disabled_by_attempts: int = 0  # Zones disabled due to max attempts reached
     orders_placed: int = 0
@@ -499,6 +503,11 @@ class DecisionFunnel:
     zones_fresh: int = 0
     zones_after_curve_filter: int = 0
     zones_after_trend_filter: int = 0
+    
+    def __post_init__(self):
+        """Initialize mutable default fields"""
+        if self.refinement_fail_samples is None:
+            self.refinement_fail_samples = []
 
 
 @dataclass
@@ -1750,8 +1759,8 @@ def execute_backtest_for_symbol(
                 # If refinement fails, skip order but keep zone active for future attempts
                 funnel.refinement_attempts += 1
                 
-                # Updated to handle tuple return: (passed, failure_reason)
-                refinement_passed, failure_reason = check_rtf_refinement(
+                # Updated to handle 3-tuple return: (passed, failure_reason, debug_info)
+                refinement_passed, failure_reason, debug_info = check_rtf_refinement(
                     ltf_candles,
                     ltf_idx,
                     zone,
@@ -1770,6 +1779,40 @@ def execute_backtest_for_symbol(
                         funnel.refinement_fail_rejection_rule += 1
                     elif failure_reason == "wrong_side":
                         funnel.refinement_fail_wrong_side += 1
+                    
+                    # === PR REQUIREMENT B: Debug sampling for refinement failures ===
+                    # Sample first N failures (cap at 25 per run) with full context
+                    MAX_SAMPLES = 25
+                    if len(funnel.refinement_fail_samples) < MAX_SAMPLES:
+                        # Build compact sample with all relevant context
+                        sample = {
+                            "symbol": symbol,
+                            "idx": ltf_idx,
+                            "side": "LONG" if zone_polarity_now == ZoneType.DEMAND else "SHORT",
+                            "zone_id": make_zone_id(symbol, zone),
+                            "failure_reason": failure_reason,
+                        }
+                        
+                        # Add candle OHLC if available
+                        if ltf_idx < len(ltf_candles):
+                            candle = ltf_candles[ltf_idx]
+                            sample["candle"] = {
+                                "open": candle.get("open"),
+                                "high": candle.get("high"),
+                                "low": candle.get("low"),
+                                "close": candle.get("close"),
+                            }
+                        
+                        # Add debug_info (computed metrics and specific failure details)
+                        if debug_info:
+                            # Extract relevant fields for compactness
+                            # Avoid duplicating large candle dict
+                            sample["computed_metrics"] = {
+                                k: v for k, v in debug_info.items()
+                                if k not in ["candle", "previous_candle", "zone_id"]
+                            }
+                        
+                        funnel.refinement_fail_samples.append(sample)
                     
                     continue
                 
@@ -2487,6 +2530,11 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         rtf_refinement_enabled=config.get('rtf_refinement', {}).get('enabled', False),
         rtf_refinement_rule=config.get('rtf_refinement', {}).get('rule', 'engulfing'),
         rtf_refinement_lookback=config.get('rtf_refinement', {}).get('lookback', 2),
+        # RTF rejection parameters (with defaults matching current behavior)
+        rejection_min_wick_ratio=config.get('rtf_refinement', {}).get('rejection_params', {}).get('min_wick_ratio', 0.40),
+        rejection_max_body_ratio=config.get('rtf_refinement', {}).get('rejection_params', {}).get('max_body_ratio', 0.50),
+        rejection_require_close_in_direction=config.get('rtf_refinement', {}).get('rejection_params', {}).get('require_close_in_direction', True),
+        rejection_require_touch_zone=config.get('rtf_refinement', {}).get('rejection_params', {}).get('require_touch_zone', True),
         # Zone attempt tracking configuration (with defaults)
         max_attempts_per_zone=config.get('zone_attempts', {}).get('max_attempts', 1),
         cooldown_bars=config.get('zone_attempts', {}).get('cooldown_bars', None),

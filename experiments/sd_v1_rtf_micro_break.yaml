@@ -1,0 +1,83 @@
+# Supply & Demand V1 - RTF Micro Break Rule
+# This config uses micro_break as the refinement rule
+
+name: "sd_v1_rtf_micro_break"
+description: "Test micro_break refinement rule instead of rejection"
+
+data_source: "synthetic"
+
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "MATIC/USDT"
+
+start_date: "2024-01-01"
+end_date: "2024-01-31"
+
+# Valid timeframe configuration
+timeframes:
+  htf: "4h"
+  itf: "1h"
+  ltf: "15m"
+  rtf: "5m"  # RTF < LTF (5m < 15m)
+
+candle_classification:
+  boring_body_ratio: 0.50
+  exciting_body_ratio: 0.50
+
+zone_detection:
+  min_base_candles: 1
+  max_base_candles: 6
+  min_legout_candles: 1
+  proximal_mode: "body"
+
+scoring:
+  min_setup_score: 6.0
+  freshness_touches_best: 0
+  freshness_touches_good: 1
+  base_time_best: 3
+  base_time_good: 6
+  legout_strength_high_threshold: 0.10
+  legout_strength_mid_threshold: 0.05
+
+trade_management:
+  risk_pct: 0.02
+  breakeven_at_r: 2.0
+  take_profit_at_r: 3.0
+  min_reward_risk: 3.0
+  stop_buffer_pct: 0.001
+
+trend_detection:
+  pivot_len: 5
+  pivots_to_consider: 4
+
+mtf_gating:
+  allow_eq_trades: true
+  eq_requires_trend_alignment: true
+  eq_min_setup_score_bonus: 1.0
+
+entry:
+  entry_mode: "limit"
+  ttl_bars: 10
+
+# === RTF REFINEMENT WITH MICRO_BREAK RULE ===
+# micro_break: LONG = close > prev_high, SHORT = close < prev_low
+rtf_refinement:
+  enabled: true
+  rule: "micro_break"  # Use micro structure break rule
+  lookback: 2
+
+zone_attempts:
+  max_attempts: 1
+  cooldown_bars: null
+
+costs:
+  fees_bps: 10.0
+  slippage_bps: 5.0
+
+initial_capital: 10000.0
+
+data_generation:
+  num_candles: 500
+  volatility: 0.02
+  seed: 42

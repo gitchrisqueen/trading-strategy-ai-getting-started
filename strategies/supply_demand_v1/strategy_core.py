@@ -97,6 +97,12 @@ class SupplyDemandParameters:
     rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
     rtf_refinement_lookback: int = 2  # Number of candles for refinement context
     
+    # RTF Rejection Rule Parameters (configurable thresholds)
+    rejection_min_wick_ratio: float = 0.40  # Minimum wick/range ratio (default 0.40 = 40%)
+    rejection_max_body_ratio: float = 0.50  # Maximum body/range ratio (default 0.50 = 50%)
+    rejection_require_close_in_direction: bool = True  # Require close in directional half
+    rejection_require_touch_zone: bool = True  # Require candle to touch zone boundary
+    
     # Zone Attempt Tracking & Cooldown
     max_attempts_per_zone: int = 1  # Maximum order placement attempts per zone (1 = no retries)
     cooldown_bars: Optional[int] = None  # Cooldown period before allowing retry (None = no cooldown)
@@ -1681,8 +1687,12 @@ def check_bullish_rejection(
     current_idx: int,
     zone_bottom: float,
     zone_top: float,
-    lookback: int = 2
-) -> bool:
+    lookback: int = 2,
+    min_wick_ratio: float = 0.40,
+    max_body_ratio: float = 0.50,
+    require_close_in_direction: bool = True,
+    require_touch_zone: bool = True
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Check for bullish rejection wick from zone boundary
     
     A bullish rejection occurs when price drops into the zone but closes
@@ -1694,39 +1704,84 @@ def check_bullish_rejection(
         zone_bottom: Bottom of the zone (distal for demand)
         zone_top: Top of the zone (proximal for demand)
         lookback: Number of previous candles to check
+        min_wick_ratio: Minimum wick/range ratio (default 0.40 = 40%)
+        max_body_ratio: Maximum body/range ratio (default 0.50 = 50%)
+        require_close_in_direction: Require close in directional half (default True)
+        require_touch_zone: Require candle to touch zone boundary (default True)
     
     Returns:
-        True if bullish rejection detected, False otherwise
+        Tuple of (passed: bool, debug_info: Optional[Dict])
+        - passed: True if bullish rejection detected, False otherwise
+        - debug_info: Dict with computed metrics and failure reason if passed=False, None if passed=True
     
     Rule:
-        - Candle low touches or enters zone
-        - Candle closes in upper 50% of candle range
-        - Lower wick is at least 40% of total range
+        - Candle low touches or enters zone (if require_touch_zone=True)
+        - Candle closes in upper half of range (if require_close_in_direction=True)
+        - Lower wick is at least min_wick_ratio of total range
+        - Body is at most max_body_ratio of total range
     """
     if current_idx < 0:
-        return False
+        return False, {"reason": "invalid_index", "current_idx": current_idx}
     
     current = candles[current_idx]
-    
-    # Check if low touched zone
-    if current['low'] > zone_top:
-        return False  # Didn't reach zone
     
     # Calculate candle metrics
     candle_range = current['high'] - current['low']
     if candle_range == 0:
-        return False  # Doji, no rejection
+        return False, {
+            "reason": "zero_range",
+            "candle": current,
+            "range": 0.0
+        }
     
-    # Check if close is in upper 50% of range
-    close_position = (current['close'] - current['low']) / candle_range
-    if close_position < 0.5:
-        return False  # Close not in upper half
-    
-    # Check lower wick size (wick = low to min(open, close))
+    # Calculate all metrics for debug output
+    body = abs(current['close'] - current['open'])
+    body_ratio = body / candle_range
     lower_wick = min(current['open'], current['close']) - current['low']
-    lower_wick_ratio = lower_wick / candle_range
+    wick_ratio = lower_wick / candle_range
+    close_position = (current['close'] - current['low']) / candle_range
+    touched_zone = current['low'] <= zone_top
     
-    return lower_wick_ratio >= 0.4
+    # Build debug info
+    debug_info = {
+        "candle": current,
+        "range": candle_range,
+        "body": body,
+        "body_ratio": body_ratio,
+        "wick": lower_wick,
+        "wick_ratio": wick_ratio,
+        "close_position": close_position,
+        "zone_bottom": zone_bottom,
+        "zone_top": zone_top,
+        "touched_zone": touched_zone,
+    }
+    
+    # Check if low touched zone (if required)
+    if require_touch_zone and not touched_zone:
+        debug_info["reason"] = "didnt_touch_zone"
+        debug_info["required_touch"] = True
+        return False, debug_info
+    
+    # Check if close is in upper half of range (if required)
+    if require_close_in_direction and close_position < 0.5:
+        debug_info["reason"] = "close_not_in_direction"
+        debug_info["required_close_position"] = ">= 0.5"
+        return False, debug_info
+    
+    # Check body ratio (reject if body too large)
+    if body_ratio > max_body_ratio:
+        debug_info["reason"] = "body_too_large"
+        debug_info["max_body_ratio"] = max_body_ratio
+        return False, debug_info
+    
+    # Check lower wick ratio (require minimum wick)
+    if wick_ratio < min_wick_ratio:
+        debug_info["reason"] = "wick_too_small"
+        debug_info["min_wick_ratio"] = min_wick_ratio
+        return False, debug_info
+    
+    # All checks passed
+    return True, None
 
 
 def check_bearish_rejection(
@@ -1734,8 +1789,12 @@ def check_bearish_rejection(
     current_idx: int,
     zone_bottom: float,
     zone_top: float,
-    lookback: int = 2
-) -> bool:
+    lookback: int = 2,
+    min_wick_ratio: float = 0.40,
+    max_body_ratio: float = 0.50,
+    require_close_in_direction: bool = True,
+    require_touch_zone: bool = True
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Check for bearish rejection wick from zone boundary
     
     A bearish rejection occurs when price rises into the zone but closes
@@ -1747,39 +1806,84 @@ def check_bearish_rejection(
         zone_bottom: Bottom of the zone (proximal for supply)
         zone_top: Top of the zone (distal for supply)
         lookback: Number of previous candles to check
+        min_wick_ratio: Minimum wick/range ratio (default 0.40 = 40%)
+        max_body_ratio: Maximum body/range ratio (default 0.50 = 50%)
+        require_close_in_direction: Require close in directional half (default True)
+        require_touch_zone: Require candle to touch zone boundary (default True)
     
     Returns:
-        True if bearish rejection detected, False otherwise
+        Tuple of (passed: bool, debug_info: Optional[Dict])
+        - passed: True if bearish rejection detected, False otherwise
+        - debug_info: Dict with computed metrics and failure reason if passed=False, None if passed=True
     
     Rule:
-        - Candle high touches or enters zone
-        - Candle closes in lower 50% of candle range
-        - Upper wick is at least 40% of total range
+        - Candle high touches or enters zone (if require_touch_zone=True)
+        - Candle closes in lower half of range (if require_close_in_direction=True)
+        - Upper wick is at least min_wick_ratio of total range
+        - Body is at most max_body_ratio of total range
     """
     if current_idx < 0:
-        return False
+        return False, {"reason": "invalid_index", "current_idx": current_idx}
     
     current = candles[current_idx]
-    
-    # Check if high touched zone
-    if current['high'] < zone_bottom:
-        return False  # Didn't reach zone
     
     # Calculate candle metrics
     candle_range = current['high'] - current['low']
     if candle_range == 0:
-        return False  # Doji, no rejection
+        return False, {
+            "reason": "zero_range",
+            "candle": current,
+            "range": 0.0
+        }
     
-    # Check if close is in lower 50% of range
-    close_position = (current['close'] - current['low']) / candle_range
-    if close_position > 0.5:
-        return False  # Close not in lower half
-    
-    # Check upper wick size (wick = high to max(open, close))
+    # Calculate all metrics for debug output
+    body = abs(current['close'] - current['open'])
+    body_ratio = body / candle_range
     upper_wick = current['high'] - max(current['open'], current['close'])
-    upper_wick_ratio = upper_wick / candle_range
+    wick_ratio = upper_wick / candle_range
+    close_position = (current['close'] - current['low']) / candle_range
+    touched_zone = current['high'] >= zone_bottom
     
-    return upper_wick_ratio >= 0.4
+    # Build debug info
+    debug_info = {
+        "candle": current,
+        "range": candle_range,
+        "body": body,
+        "body_ratio": body_ratio,
+        "wick": upper_wick,
+        "wick_ratio": wick_ratio,
+        "close_position": close_position,
+        "zone_bottom": zone_bottom,
+        "zone_top": zone_top,
+        "touched_zone": touched_zone,
+    }
+    
+    # Check if high touched zone (if required)
+    if require_touch_zone and not touched_zone:
+        debug_info["reason"] = "didnt_touch_zone"
+        debug_info["required_touch"] = True
+        return False, debug_info
+    
+    # Check if close is in lower half of range (if required)
+    if require_close_in_direction and close_position > 0.5:
+        debug_info["reason"] = "close_not_in_direction"
+        debug_info["required_close_position"] = "<= 0.5"
+        return False, debug_info
+    
+    # Check body ratio (reject if body too large)
+    if body_ratio > max_body_ratio:
+        debug_info["reason"] = "body_too_large"
+        debug_info["max_body_ratio"] = max_body_ratio
+        return False, debug_info
+    
+    # Check upper wick ratio (require minimum wick)
+    if wick_ratio < min_wick_ratio:
+        debug_info["reason"] = "wick_too_small"
+        debug_info["min_wick_ratio"] = min_wick_ratio
+        return False, debug_info
+    
+    # All checks passed
+    return True, None
 
 
 def check_bullish_micro_break(
@@ -1846,7 +1950,7 @@ def check_rtf_refinement(
     zone: Zone,
     polarity: ZoneType,
     parameters: SupplyDemandParameters
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
     """Check if RTF entry refinement criteria are met
     
     This is the main RTF refinement function that checks if a zone setup
@@ -1861,32 +1965,36 @@ def check_rtf_refinement(
         parameters: Strategy parameters with rtf_refinement settings
     
     Returns:
-        Tuple of (passed: bool, failure_reason: Optional[str])
+        Tuple of (passed: bool, failure_reason: Optional[str], debug_info: Optional[Dict])
         - passed: True if refinement passes (allow order placement), False otherwise
         - failure_reason: Reason for failure if passed is False, None otherwise
           Possible reasons: "insufficient_candles", "rejection_rule", "wrong_side"
+        - debug_info: Dict with computed metrics and failure details, or None if passed
     
     Behavior:
-        - If rtf_refinement_enabled is False: always return (True, None) (no filtering)
+        - If rtf_refinement_enabled is False: always return (True, None, None) (no filtering)
         - If enabled: check the configured rule (engulfing, rejection, micro_break)
         - Direction-aware: LONG logic for DEMAND polarity, SHORT logic for SUPPLY polarity
     
     Rules:
         engulfing: Bullish/Bearish engulfing pattern inside zone
-        rejection: Rejection wick from zone boundary
+        rejection: Rejection wick from zone boundary (now configurable)
         micro_break: Close breaks previous high (LONG) or low (SHORT)
     """
     # If refinement is disabled, always pass
     if not parameters.rtf_refinement_enabled:
-        return True, None
+        return True, None, None
     
     # Need at least 1 previous candle for all rules
     if current_idx < 1:
-        return False, "insufficient_candles"
+        return False, "insufficient_candles", {"current_idx": current_idx, "required": 1}
     
     # Ensure we have enough candles for lookback
     if current_idx < parameters.rtf_refinement_lookback:
-        return False, "insufficient_candles"
+        return False, "insufficient_candles", {
+            "current_idx": current_idx,
+            "required_lookback": parameters.rtf_refinement_lookback
+        }
     
     # Determine if this is a LONG or SHORT setup based on current polarity
     is_long = polarity == ZoneType.DEMAND
@@ -1909,22 +2017,65 @@ def check_rtf_refinement(
             passed = check_bullish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
         else:
             passed = check_bearish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
-        return (True, None) if passed else (False, "rejection_rule")
+        
+        if not passed:
+            debug_info = {
+                "rule": "engulfing",
+                "side": "LONG" if is_long else "SHORT",
+                "current_idx": current_idx,
+                "candle": candles[current_idx],
+            }
+            return False, "rejection_rule", debug_info
+        return True, None, None
     
     elif rule == "rejection":
+        # Use configurable rejection parameters
         if is_long:
-            passed = check_bullish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+            passed, debug_info = check_bullish_rejection(
+                candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback,
+                min_wick_ratio=parameters.rejection_min_wick_ratio,
+                max_body_ratio=parameters.rejection_max_body_ratio,
+                require_close_in_direction=parameters.rejection_require_close_in_direction,
+                require_touch_zone=parameters.rejection_require_touch_zone
+            )
         else:
-            passed = check_bearish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
-        return (True, None) if passed else (False, "rejection_rule")
+            passed, debug_info = check_bearish_rejection(
+                candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback,
+                min_wick_ratio=parameters.rejection_min_wick_ratio,
+                max_body_ratio=parameters.rejection_max_body_ratio,
+                require_close_in_direction=parameters.rejection_require_close_in_direction,
+                require_touch_zone=parameters.rejection_require_touch_zone
+            )
+        
+        if not passed:
+            # Add rule and side info to debug_info
+            if debug_info:
+                debug_info["rule"] = "rejection"
+                debug_info["side"] = "LONG" if is_long else "SHORT"
+            return False, "rejection_rule", debug_info
+        return True, None, None
     
     elif rule == "micro_break":
         if is_long:
             passed = check_bullish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
         else:
             passed = check_bearish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
-        return (True, None) if passed else (False, "rejection_rule")
+        
+        if not passed:
+            debug_info = {
+                "rule": "micro_break",
+                "side": "LONG" if is_long else "SHORT",
+                "current_idx": current_idx,
+                "candle": candles[current_idx],
+                "previous_candle": candles[current_idx - 1] if current_idx > 0 else None,
+            }
+            return False, "rejection_rule", debug_info
+        return True, None, None
     
     else:
         # Unknown rule, fail refinement
-        return False, "rejection_rule"
+        debug_info = {
+            "rule": rule,
+            "error": "unknown_rule",
+        }
+        return False, "rejection_rule", debug_info
