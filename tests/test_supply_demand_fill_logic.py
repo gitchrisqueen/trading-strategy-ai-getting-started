@@ -101,9 +101,8 @@ class TestLimitOrderFillLong:
         assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         assert trade_plan.actual_entry_price is not None
-        # Entry price should be limit + slippage
-        expected_entry = 100.0 + (100.0 * 5.0 / 10000.0)  # 100.05
-        assert abs(trade_plan.actual_entry_price - expected_entry) < 0.01
+        # DETERMINISTIC FILL: Entry price should equal limit_price exactly
+        assert trade_plan.actual_entry_price == 100.0, f"Expected fill at limit 100.0, got {trade_plan.actual_entry_price}"
         assert trade_plan.entry_cost > 0, "Entry cost should be positive"
     
     def test_long_not_filled_when_price_stays_above(self):
@@ -225,9 +224,8 @@ class TestLimitOrderFillShort:
         assert trade_plan.order_state.value == "filled"
         assert trade_plan.filled_at_idx == 0
         assert trade_plan.actual_entry_price is not None
-        # Entry price should be limit - slippage for short
-        expected_entry = 100.0 - (100.0 * 5.0 / 10000.0)  # 99.95
-        assert abs(trade_plan.actual_entry_price - expected_entry) < 0.01
+        # DETERMINISTIC FILL: Entry price should equal limit_price exactly
+        assert trade_plan.actual_entry_price == 100.0, f"Expected fill at limit 100.0, got {trade_plan.actual_entry_price}"
         assert trade_plan.entry_cost > 0
     
     def test_short_not_filled_when_price_stays_below(self):
@@ -436,14 +434,14 @@ class TestPnLWithCosts:
         exit_price = 115.0  # 15% profit
         pnl = calculate_pnl_with_costs(trade_plan, exit_price, params)
         
-        # Actual entry = 100.05 (with slippage)
+        # DETERMINISTIC FILL: Actual entry = 100.0 (limit price, no slippage on fill)
         # Position size = 200 / 5 = 40 units (2% of 10000 = 200, risk per unit = 5)
-        # Gross PnL = (115 - 100.05) * 40 = 598
-        # Entry cost = 100.05 * 40 * 15 / 10000 = 6.003
+        # Gross PnL = (115 - 100.0) * 40 = 600
+        # Entry cost = 100.0 * 40 * 15 / 10000 = 6.0
         # Exit cost = 115 * 40 * 15 / 10000 = 6.9
-        # Net PnL = 598 - 6.003 - 6.9 = 585.097
+        # Net PnL = 600 - 6.0 - 6.9 = 587.1
         
-        expected_pnl = 585.097
+        expected_pnl = 587.1
         assert pnl > 0, "PnL should be positive"
         assert abs(pnl - expected_pnl) < 1.0, f"Expected ~{expected_pnl}, got {pnl}"
     
@@ -881,3 +879,194 @@ class TestSameCandleFills:
         assert filled is False, "Order should NOT fill if price doesn't touch limit"
         # Compare by value due to enum comparison issue
         assert trade_plan.order_state.value == 'pending'
+
+
+class TestDeterministicFillPrice:
+    """Test deterministic fill price (fill_price == limit_price)
+    
+    These tests validate the PR requirement that filled orders must have
+    fill_price equal to limit_price exactly (no slippage added to fill price).
+    """
+    
+    def test_long_fill_price_equals_limit_price(self):
+        """Test LONG order fills at limit_price exactly (deterministic)"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,  # Slippage affects costs, not fill price
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        limit_price = trade_plan.entry_price  # Should be 100.0 (zone proximal)
+        trade_plan.placed_at_idx = 0
+        
+        # Candle with wick touching limit
+        candles = [
+            {'open': 102, 'high': 103, 'low': 99.5, 'close': 101},  # Low touches limit
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is True
+        assert trade_plan.order_state.value == "filled"
+        assert trade_plan.filled_at_idx == 0
+        # CRITICAL: actual_entry_price must equal limit_price exactly
+        assert trade_plan.actual_entry_price == limit_price, \
+            f"Fill price {trade_plan.actual_entry_price} must equal limit {limit_price}"
+        assert trade_plan.entry_cost > 0, "Entry cost should include fees/slippage"
+    
+    def test_short_fill_price_equals_limit_price(self):
+        """Test SHORT order fills at limit_price exactly (deterministic)"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,  # Slippage affects costs, not fill price
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 98.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        limit_price = trade_plan.entry_price  # Should be 100.0 (zone proximal)
+        trade_plan.placed_at_idx = 0
+        
+        # Candle with wick touching limit
+        candles = [
+            {'open': 99, 'high': 100.5, 'low': 98, 'close': 99},  # High touches limit
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is True
+        assert trade_plan.order_state.value == "filled"
+        assert trade_plan.filled_at_idx == 0
+        # CRITICAL: actual_entry_price must equal limit_price exactly
+        assert trade_plan.actual_entry_price == limit_price, \
+            f"Fill price {trade_plan.actual_entry_price} must equal limit {limit_price}"
+        assert trade_plan.entry_cost > 0, "Entry cost should include fees/slippage"
+    
+    def test_same_candle_fill_sets_filled_idx_equal_placed_idx(self):
+        """Test that same-candle fills set filled_idx == placed_idx"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        placed_idx = 5
+        trade_plan.placed_at_idx = placed_idx
+        
+        # Build candles with fill happening at placement index
+        candles = [{'open': 100, 'high': 100, 'low': 100, 'close': 100}] * 6
+        candles[placed_idx] = {'open': 102, 'high': 103, 'low': 99, 'close': 101}
+        
+        # Check fill on same candle as placement
+        filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
+        
+        assert filled is True
+        assert trade_plan.filled_at_idx == placed_idx, \
+            f"Same-candle fill should set filled_idx={placed_idx}, got {trade_plan.filled_at_idx}"
+        assert trade_plan.actual_entry_price == 100.0
+    
+    def test_no_fill_when_wick_never_touches_within_ttl(self):
+        """Test that order does NOT fill if wick never touches limit within TTL"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=3  # Order expires after 3 candles
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        trade_plan.placed_at_idx = 0
+        
+        # Create candles where price never touches limit during TTL
+        candles = [
+            {'open': 105, 'high': 107, 'low': 103, 'close': 106},  # idx 0: low=103 > limit
+            {'open': 106, 'high': 108, 'low': 104, 'close': 107},  # idx 1: low=104 > limit
+            {'open': 107, 'high': 109, 'low': 105, 'close': 108},  # idx 2: low=105 > limit
+            {'open': 108, 'high': 110, 'low': 106, 'close': 109},  # idx 3: TTL expired
+            {'open': 102, 'high': 103, 'low': 99, 'close': 101},   # idx 4: would touch but after TTL
+        ]
+        
+        # Check fills at indices 0, 1, 2 - should all be false (no touch)
+        for idx in [0, 1, 2]:
+            filled = check_limit_order_fill(trade_plan, candles, idx, params)
+            assert filled is False, f"Should not fill at idx {idx} (no touch)"
+            assert trade_plan.order_state.value == "pending"
+        
+        # Check at idx 3 - TTL expired, should be cancelled
+        filled = check_limit_order_fill(trade_plan, candles, 3, params)
+        assert filled is False, "Should not fill at idx 3 (TTL expired)"
+        assert trade_plan.order_state.value == "cancelled", "Order should be cancelled after TTL"
+        assert trade_plan.filled_at_idx is None
+        assert trade_plan.actual_entry_price is None

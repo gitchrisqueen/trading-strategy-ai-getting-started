@@ -1565,20 +1565,14 @@ def check_limit_order_fill(
         trade_plan.order_state = OrderState.FILLED
         trade_plan.filled_at_idx = current_idx
         
-        # Calculate actual entry price with slippage
-        # Slippage works against us: longs pay more, shorts receive less
-        slippage_amount = (limit_price * parameters.slippage_bps) / 10000.0
-        
-        if is_long:
-            actual_price = limit_price + slippage_amount
-        else:
-            actual_price = limit_price - slippage_amount
-        
-        trade_plan.actual_entry_price = actual_price
+        # DETERMINISTIC FILL: Set actual_entry_price to limit_price exactly
+        # For limit orders, we fill at the limit price (no slippage on fill price)
+        # Costs (fees + slippage) are still tracked separately in entry_cost
+        trade_plan.actual_entry_price = limit_price
         
         # Calculate entry costs (fees + slippage)
         trade_plan.entry_cost = calculate_trading_costs(
-            actual_price,
+            limit_price,
             trade_plan.position_size,
             parameters.fees_bps,
             parameters.slippage_bps
