@@ -409,6 +409,7 @@ class DecisionFunnel:
     candidates_scored: int = 0   # Candidates that passed gating and were scored
     rejected_min_setup_score: int = 0
     rejected_min_reward_risk: int = 0
+    rejected_proximity: int = 0  # Rejected by proximity trigger (price too far from zone)
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
@@ -1067,7 +1068,17 @@ def execute_backtest_for_symbol(
     # Track capital and positions
     capital = initial_capital
     trades = []
-    orders = []  # Track all order lifecycle events
+    
+    # ORDER LIFECYCLE: Single source of truth for order state
+    # order_registry: Dict[order_id, order_dict] - maintains complete order lifecycle
+    # Keys are unique order IDs (zone_id + placed_idx), values are order dicts with status
+    order_registry: Dict[str, Dict[str, Any]] = {}
+    order_id_counter = 0  # For generating unique order IDs
+    
+    # plan_to_order_id: Map TradePlan objects to their order_ids
+    # This avoids needing to add order_id as an attribute to TradePlan dataclass
+    plan_to_order_id: Dict[int, str] = {}  # Use id(plan) as key
+    
     pending_plans = []  # Plans with pending orders
     open_positions = []  # Plans with filled orders (active positions)
     
@@ -1184,12 +1195,30 @@ def execute_backtest_for_symbol(
         
         # Check for fills on pending orders (LTF fills only)
         for plan in list(pending_plans):
-            if plan.order_state == OrderState.PENDING:
+            # WORKAROUND: Enum comparison failing (likely duplicate imports), compare values instead
+            if str(plan.order_state.value if hasattr(plan.order_state, 'value') else plan.order_state) == 'pending':
+                try:
+                    # Get order_id from mapping (not from plan attribute)
+                    plan_id = id(plan)
+                    order_id = plan_to_order_id.get(plan_id)
+                except Exception as e:
+                    print(f"⚠️  EXCEPTION in pending check: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+                
+                if order_id is None:
+                    # This should not happen - it means plan was not registered
+                    print(f"⚠️  WARNING: Plan without order_id mapping at idx {ltf_idx}, placed_at {plan.placed_at_idx}")
+                    print(f"   This indicates a bug in order placement logic.")
+                    # Skip this plan
+                    pending_plans.remove(plan)
+                    continue
+                
                 # Check TTL expiration first
                 if params.ttl_bars and (ltf_idx - plan.placed_at_idx) >= params.ttl_bars:
                     plan.order_state = OrderState.CANCELLED
                     pending_plans.remove(plan)
-                    funnel.orders_expired_ttl += 1
                     
                     # ORDER DEDUPLICATION: Remove from active_orders_by_zone and set price reset flag
                     plan_zone_id = make_zone_id(symbol, plan.zone)
@@ -1206,14 +1235,11 @@ def execute_backtest_for_symbol(
                             'last_expiry_idx': ltf_idx,
                         }
                     
-                    # Update order record with expiry
-                    zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
-                    for order in orders:
-                        if order['zone_id'] == zone_id and order['status'] == 'PLACED':
-                            order['status'] = 'EXPIRED'
-                            order['cancel_reason'] = 'TTL_EXPIRED'
-                            order['expiry_idx'] = ltf_idx
-                            break
+                    # Update order record in registry with expiry
+                    if order_id in order_registry:
+                        order_registry[order_id]['status'] = 'EXPIRED'
+                        order_registry[order_id]['cancel_reason'] = 'TTL_EXPIRED'
+                        order_registry[order_id]['expiry_idx'] = ltf_idx
                     
                     continue
                 
@@ -1227,7 +1253,6 @@ def execute_backtest_for_symbol(
                 if filled:
                     plan.order_state = OrderState.FILLED
                     plan.filled_at_idx = ltf_idx
-                    funnel.orders_filled += 1
                     
                     # ORDER DEDUPLICATION: Remove from active_orders_by_zone (order is filled)
                     plan_zone_id = make_zone_id(symbol, plan.zone)
@@ -1237,15 +1262,12 @@ def execute_backtest_for_symbol(
                     if order_key_fill in active_orders_by_zone:
                         del active_orders_by_zone[order_key_fill]
                     
-                    # Update order record with fill
-                    zone_id = f"{symbol}_{plan.zone.created_at}_{plan.zone.zone_type.value}"
-                    for order in orders:
-                        if order['zone_id'] == zone_id and order['status'] == 'PLACED':
-                            order['status'] = 'FILLED'
-                            order['filled_idx'] = ltf_idx
-                            order['filled_time'] = ltf_candle.get('timestamp')
-                            order['fill_price'] = plan.actual_entry_price or plan.entry_price
-                            break
+                    # Update order record in registry with fill
+                    if order_id in order_registry:
+                        order_registry[order_id]['status'] = 'FILLED'
+                        order_registry[order_id]['filled_idx'] = ltf_idx
+                        order_registry[order_id]['filled_time'] = ltf_candle.get('timestamp')
+                        order_registry[order_id]['fill_price'] = plan.actual_entry_price or plan.entry_price
                     
                     # Move from pending to open positions
                     pending_plans.remove(plan)
@@ -1461,6 +1483,14 @@ def execute_backtest_for_symbol(
             for zone_id, zone in active_zones.items():
                 # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
+                # PROXIMITY TRIGGER: Skip zones that were just created
+                # Zones need time to "cool off" before we consider placing orders
+                # This prevents placing orders at zone creation (not a retest)
+                zone_age = ltf_idx - zone.created_at
+                min_zone_age = 5  # Minimum bars before zone is eligible for order placement
+                if zone_age < min_zone_age:
+                    continue  # Zone too young, skip
+                
                 # Check if we already have a pending order or position for this zone
                 zone_already_traded = any(
                     p.zone == zone for p in pending_plans + open_positions
@@ -1571,6 +1601,49 @@ def execute_backtest_for_symbol(
                     funnel.rejected_min_setup_score += 1
                     continue
                 
+                # PROXIMITY TRIGGER: Only place orders when price is near the zone
+                # This prevents placing orders immediately after zone creation
+                # Orders should be placed when price returns to test the zone
+                
+                # Calculate zone width
+                zone_width = abs(zone.distal - zone.proximal)
+                
+                # Determine entry price (limit price where order will be placed)
+                # For DEMAND (LONG): entry at proximal (buy when price drops to zone)
+                # For SUPPLY (SHORT): entry at proximal (sell when price rises to zone)
+                limit_price = zone.proximal
+                
+                # Calculate distance from current price to limit price
+                distance_to_entry = abs(current_price - limit_price)
+                
+                # Calculate proximity threshold
+                proximity_threshold = max(
+                    params.entry_proximity_abs,
+                    params.entry_proximity_zone_width_mult * zone_width
+                )
+                
+                # Check if price is within proximity threshold
+                if distance_to_entry > proximity_threshold:
+                    funnel.rejected_proximity += 1
+                    continue
+                
+                # Optional: Check if price is on correct side and approaching
+                if params.require_price_on_correct_side:
+                    if zone_polarity_now == ZoneType.DEMAND:
+                        # For DEMAND (LONG), price should be above zone (can drop into it)
+                        # We want to place when price is near but hasn't fully entered yet
+                        if current_price < zone.distal:
+                            # Price is below the zone entirely, skip
+                            funnel.rejected_proximity += 1
+                            continue
+                    else:  # SUPPLY
+                        # For SUPPLY (SHORT), price should be below zone (can rise into it)
+                        # We want to place when price is near but hasn't fully entered yet
+                        if current_price > zone.distal:
+                            # Price is above the zone entirely, skip
+                            funnel.rejected_proximity += 1
+                            continue
+                
                 # Build trade plan
                 plan = build_trade_plan(
                     zone,
@@ -1587,8 +1660,16 @@ def execute_backtest_for_symbol(
                 
                 # Place order
                 plan.placed_at_idx = ltf_idx
+                
+                # Generate unique order ID
+                order_id = f"{symbol}_{order_id_counter}"
+                order_id_counter += 1
+                
+                # Map plan to order_id (can't add as attribute to dataclass)
+                plan_id = id(plan)
+                plan_to_order_id[plan_id] = order_id
+                
                 pending_plans.append(plan)
-                funnel.orders_placed += 1
                 
                 # Create order record with curve and trend state
                 # Use dynamic polarity at order placement time
@@ -1605,6 +1686,7 @@ def execute_backtest_for_symbol(
                     'placed_idx': ltf_idx,
                     'expiry_idx': expiry_idx,
                     'plan': plan,
+                    'order_id': order_id,
                 }
                 active_orders_by_zone[order_key] = order_info
                 
@@ -1617,7 +1699,8 @@ def execute_backtest_for_symbol(
                     'expiry_idx': expiry_idx,
                 })
                 
-                orders.append({
+                # Add order to registry (single source of truth)
+                order_registry[order_id] = {
                     'symbol': symbol,
                     'side': side,
                     'zone_id': zone_id,
@@ -1639,7 +1722,7 @@ def execute_backtest_for_symbol(
                     # Polarity tracking
                     'polarity_type_at_order': enum_to_string(order_polarity),
                     'flip_count_at_order': zone.flip_count,
-                })
+                }
     
     # Close any remaining open positions at EOD (end of data)
     if ltf_candles:
@@ -1685,6 +1768,13 @@ def execute_backtest_for_symbol(
     end_idx = len(ltf_candles) - 1
     funnel.zones_fresh_final = sum(1 for z in ltf_zones if is_zone_fresh_at_idx(z, end_idx))
     
+    # DECISION FUNNEL: Recompute counts from final order_registry state
+    # This ensures funnel matches orders.csv and prevents mismatches
+    orders_list = list(order_registry.values())
+    funnel.orders_placed = len(orders_list)
+    funnel.orders_filled = sum(1 for o in orders_list if o['status'] == 'FILLED')
+    funnel.orders_expired_ttl = sum(1 for o in orders_list if o['status'] == 'EXPIRED')
+    
     # Calculate and print runtime sanity metrics
     avg_active_zones = active_zones_sum / active_zones_samples if active_zones_samples > 0 else 0.0
     avg_flip_checks = flip_checks_total / flip_checks_samples if flip_checks_samples > 0 else 0.0
@@ -1699,6 +1789,14 @@ def execute_backtest_for_symbol(
     print(f"{'Zones Detected (LTF)':30s}: {len(ltf_zones)}")
     print(f"{'Candidates Scored':30s}: {funnel.candidates_scored}")
     print(f"{'Orders Placed':30s}: {funnel.orders_placed}")
+    print(f"")
+    print(f"{'='*80}")
+    print(f"ORDER STATUS SUMMARY - {symbol}")
+    print(f"{'='*80}")
+    print(f"{'Orders Placed':30s}: {funnel.orders_placed}")
+    print(f"{'Orders Filled':30s}: {funnel.orders_filled}")
+    print(f"{'Orders Expired (TTL)':30s}: {funnel.orders_expired_ttl}")
+    print(f"{'Orders Still Pending':30s}: {funnel.orders_placed - funnel.orders_filled - funnel.orders_expired_ttl}")
     print(f"")
     print(f"{'='*80}")
     print(f"POLARITY FLIP PERFORMANCE - {symbol}")
@@ -1794,7 +1892,7 @@ def execute_backtest_for_symbol(
     funnel.flips_supply_to_demand = flips_supply_to_demand
     funnel.flips_demand_to_supply = flips_demand_to_supply
     
-    return trades, zone_dicts, orders, capital, equity_curve, funnel
+    return trades, zone_dicts, orders_list, capital, equity_curve, funnel
 
 
 def run_symbol_backtest(
@@ -2230,6 +2328,15 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
     # Sort orders by (symbol, placed_idx)
     all_orders.sort(key=lambda o: (o['symbol'], o.get('placed_idx', 0)))
     
+    # Compute order status counts for run_manifest
+    order_status_counts = {
+        'total': len(all_orders),
+        'placed': sum(1 for o in all_orders if o['status'] == 'PLACED'),
+        'filled': sum(1 for o in all_orders if o['status'] == 'FILLED'),
+        'expired': sum(1 for o in all_orders if o['status'] == 'EXPIRED'),
+        'cancelled': sum(1 for o in all_orders if o['status'] == 'CANCELLED'),
+    }
+    
     # Guard-rail: Validate that multi-symbol runs have different data per symbol
     if len(config['symbols']) >= 2:
         # Compare results between first two symbols
@@ -2402,6 +2509,8 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         },
         'candle_timeframe': params.ltf_tf,  # Legacy field for backward compatibility
         'symbol_data_provenance': symbol_data_provenance,
+        # Order status counts (for validation)
+        'order_status_counts': order_status_counts,
     }
     
     # Add data_generation info for synthetic data
@@ -2567,6 +2676,7 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'candidates_scored': sum(f.candidates_scored for f in result.decision_funnels),
             'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
             'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
+            'rejected_proximity': sum(f.rejected_proximity for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
@@ -2632,11 +2742,38 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     if agg['rejected_min_setup_score'] > 0:
         print(f"  ├─ Rejected (Min Score):   {agg['rejected_min_setup_score']}")
     if agg['rejected_min_reward_risk'] > 0:
-        print(f"  └─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
+        print(f"  ├─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
+    if agg.get('rejected_proximity', 0) > 0:
+        print(f"  └─ Rejected (Proximity):   {agg['rejected_proximity']}")
     print(f"Orders Placed:               {agg['orders_placed']}")
     print(f"  ├─ Filled:                 {agg['orders_filled']}")
     print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")
     print(f"Trades Closed:               {agg['trades_closed']}")
+    print("=" * 80)
+    
+    # Validate order status counts match funnel
+    order_status_counts = result.run_manifest.get('order_status_counts', {})
+    print("\n" + "=" * 80)
+    print("ORDER STATUS VALIDATION")
+    print("=" * 80)
+    print(f"From orders.csv:             Total: {order_status_counts.get('total', 0)}, "
+          f"Filled: {order_status_counts.get('filled', 0)}, "
+          f"Expired: {order_status_counts.get('expired', 0)}, "
+          f"Pending: {order_status_counts.get('placed', 0)}")
+    print(f"From decision_funnel.json:   Placed: {agg['orders_placed']}, "
+          f"Filled: {agg['orders_filled']}, "
+          f"Expired: {agg['orders_expired_ttl']}")
+    
+    # Check for consistency
+    funnel_matches = (
+        order_status_counts.get('total', 0) == agg['orders_placed'] and
+        order_status_counts.get('filled', 0) == agg['orders_filled'] and
+        order_status_counts.get('expired', 0) == agg['orders_expired_ttl']
+    )
+    if funnel_matches:
+        print("✅ Order status counts MATCH between orders.csv and decision_funnel.json")
+    else:
+        print("⚠️  WARNING: Order status counts DO NOT MATCH!")
     print("=" * 80)
     
     print(f"\nArtifacts written to: {artifacts_dir}")
