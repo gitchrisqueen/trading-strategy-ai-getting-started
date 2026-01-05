@@ -73,6 +73,14 @@ entry:
   entry_mode: "limit"  # "limit" or "confirmation"
   ttl_bars: 10         # Time-to-live for limit orders
 
+# RTF Entry Refinement (optional)
+# Refines entry timing after proximity trigger passes
+# Disabled by default to preserve existing behavior
+rtf_refinement:
+  enabled: false         # Enable RTF entry refinement stage
+  rule: "engulfing"      # "engulfing", "rejection", or "micro_break"
+  lookback: 2            # Number of candles for refinement context
+
 # Trading costs
 costs:
   fees_bps: 10.0      # 0.1% trading fees

@@ -117,6 +117,11 @@ class SupplyDemandParameters:
     
     # Limit Order Configuration
     ttl_bars: Optional[int] = 10  # Time-to-live in bars for limit orders (None = no expiry)
+    
+    # RTF Entry Refinement Configuration
+    rtf_refinement_enabled: bool = False  # Enable RTF entry refinement stage
+    rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
+    rtf_refinement_lookback: int = 2  # Number of candles for refinement context
 
 
 @dataclass
@@ -1601,3 +1606,339 @@ def detect_pivot_highs_lows_bounded(
 
 
 
+
+# ============================================================================
+# RTF Entry Refinement Functions
+# ============================================================================
+
+
+def check_bullish_engulfing(
+    candles: Any,
+    current_idx: int,
+    lookback: int = 2
+) -> bool:
+    """Check for bullish engulfing pattern inside zone
+    
+    A bullish engulfing occurs when current candle's body engulfs the previous candle's body.
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        lookback: Number of previous candles to check (default 2)
+    
+    Returns:
+        True if bullish engulfing pattern detected, False otherwise
+    
+    Rule:
+        - Previous candle: bearish (close < open)
+        - Current candle: bullish (close > open)
+        - Current candle body engulfs previous: current_close > prev_open AND current_open < prev_close
+    """
+    if current_idx < 1:
+        return False
+    
+    # Get current and previous candle
+    current = candles[current_idx]
+    previous = candles[current_idx - 1]
+    
+    # Check if previous candle is bearish
+    prev_bearish = previous['close'] < previous['open']
+    
+    # Check if current candle is bullish
+    curr_bullish = current['close'] > current['open']
+    
+    # Check if current body engulfs previous body
+    engulfs = (current['close'] > previous['open'] and 
+               current['open'] < previous['close'])
+    
+    return prev_bearish and curr_bullish and engulfs
+
+
+def check_bearish_engulfing(
+    candles: Any,
+    current_idx: int,
+    lookback: int = 2
+) -> bool:
+    """Check for bearish engulfing pattern inside zone
+    
+    A bearish engulfing occurs when current candle's body engulfs the previous candle's body.
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        lookback: Number of previous candles to check (default 2)
+    
+    Returns:
+        True if bearish engulfing pattern detected, False otherwise
+    
+    Rule:
+        - Previous candle: bullish (close > open)
+        - Current candle: bearish (close < open)
+        - Current candle body engulfs previous: current_close < prev_open AND current_open > prev_close
+    """
+    if current_idx < 1:
+        return False
+    
+    # Get current and previous candle
+    current = candles[current_idx]
+    previous = candles[current_idx - 1]
+    
+    # Check if previous candle is bullish
+    prev_bullish = previous['close'] > previous['open']
+    
+    # Check if current candle is bearish
+    curr_bearish = current['close'] < current['open']
+    
+    # Check if current body engulfs previous body
+    engulfs = (current['close'] < previous['open'] and 
+               current['open'] > previous['close'])
+    
+    return prev_bullish and curr_bearish and engulfs
+
+
+def check_bullish_rejection(
+    candles: Any,
+    current_idx: int,
+    zone_bottom: float,
+    zone_top: float,
+    lookback: int = 2
+) -> bool:
+    """Check for bullish rejection wick from zone boundary
+    
+    A bullish rejection occurs when price drops into the zone but closes
+    significantly above the low, showing buying pressure at the zone.
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        zone_bottom: Bottom of the zone (distal for demand)
+        zone_top: Top of the zone (proximal for demand)
+        lookback: Number of previous candles to check
+    
+    Returns:
+        True if bullish rejection detected, False otherwise
+    
+    Rule:
+        - Candle low touches or enters zone
+        - Candle closes in upper 50% of candle range
+        - Lower wick is at least 40% of total range
+    """
+    if current_idx < 0:
+        return False
+    
+    current = candles[current_idx]
+    
+    # Check if low touched zone
+    if current['low'] > zone_top:
+        return False  # Didn't reach zone
+    
+    # Calculate candle metrics
+    candle_range = current['high'] - current['low']
+    if candle_range == 0:
+        return False  # Doji, no rejection
+    
+    # Check if close is in upper 50% of range
+    close_position = (current['close'] - current['low']) / candle_range
+    if close_position < 0.5:
+        return False  # Close not in upper half
+    
+    # Check lower wick size (wick = low to min(open, close))
+    lower_wick = min(current['open'], current['close']) - current['low']
+    lower_wick_ratio = lower_wick / candle_range
+    
+    return lower_wick_ratio >= 0.4
+
+
+def check_bearish_rejection(
+    candles: Any,
+    current_idx: int,
+    zone_bottom: float,
+    zone_top: float,
+    lookback: int = 2
+) -> bool:
+    """Check for bearish rejection wick from zone boundary
+    
+    A bearish rejection occurs when price rises into the zone but closes
+    significantly below the high, showing selling pressure at the zone.
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        zone_bottom: Bottom of the zone (proximal for supply)
+        zone_top: Top of the zone (distal for supply)
+        lookback: Number of previous candles to check
+    
+    Returns:
+        True if bearish rejection detected, False otherwise
+    
+    Rule:
+        - Candle high touches or enters zone
+        - Candle closes in lower 50% of candle range
+        - Upper wick is at least 40% of total range
+    """
+    if current_idx < 0:
+        return False
+    
+    current = candles[current_idx]
+    
+    # Check if high touched zone
+    if current['high'] < zone_bottom:
+        return False  # Didn't reach zone
+    
+    # Calculate candle metrics
+    candle_range = current['high'] - current['low']
+    if candle_range == 0:
+        return False  # Doji, no rejection
+    
+    # Check if close is in lower 50% of range
+    close_position = (current['close'] - current['low']) / candle_range
+    if close_position > 0.5:
+        return False  # Close not in lower half
+    
+    # Check upper wick size (wick = high to max(open, close))
+    upper_wick = current['high'] - max(current['open'], current['close'])
+    upper_wick_ratio = upper_wick / candle_range
+    
+    return upper_wick_ratio >= 0.4
+
+
+def check_bullish_micro_break(
+    candles: Any,
+    current_idx: int,
+    lookback: int = 2
+) -> bool:
+    """Check for bullish micro structure break
+    
+    LONG confirmation: current candle close > previous candle high
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        lookback: Number of previous candles to check
+    
+    Returns:
+        True if bullish micro break detected, False otherwise
+    
+    Rule:
+        Current close > previous high (breaking above recent structure)
+    """
+    if current_idx < 1:
+        return False
+    
+    current = candles[current_idx]
+    previous = candles[current_idx - 1]
+    
+    return current['close'] > previous['high']
+
+
+def check_bearish_micro_break(
+    candles: Any,
+    current_idx: int,
+    lookback: int = 2
+) -> bool:
+    """Check for bearish micro structure break
+    
+    SHORT confirmation: current candle close < previous candle low
+    
+    Args:
+        candles: OHLC candle data
+        current_idx: Current candle index
+        lookback: Number of previous candles to check
+    
+    Returns:
+        True if bearish micro break detected, False otherwise
+    
+    Rule:
+        Current close < previous low (breaking below recent structure)
+    """
+    if current_idx < 1:
+        return False
+    
+    current = candles[current_idx]
+    previous = candles[current_idx - 1]
+    
+    return current['close'] < previous['low']
+
+
+def check_rtf_refinement(
+    candles: Any,
+    current_idx: int,
+    zone: Zone,
+    polarity: ZoneType,
+    parameters: SupplyDemandParameters
+) -> bool:
+    """Check if RTF entry refinement criteria are met
+    
+    This is the main RTF refinement function that checks if a zone setup
+    passes the configured refinement rule. It uses CURRENT POLARITY (time-relative)
+    rather than original zone type.
+    
+    Args:
+        candles: LTF candle data (use current + lookback candles only)
+        current_idx: Current candle index
+        zone: Zone being evaluated
+        polarity: Current polarity of the zone (DEMAND for LONG, SUPPLY for SHORT)
+        parameters: Strategy parameters with rtf_refinement settings
+    
+    Returns:
+        True if refinement passes (allow order placement), False otherwise
+    
+    Behavior:
+        - If rtf_refinement_enabled is False: always return True (no filtering)
+        - If enabled: check the configured rule (engulfing, rejection, micro_break)
+        - Direction-aware: LONG logic for DEMAND polarity, SHORT logic for SUPPLY polarity
+    
+    Rules:
+        engulfing: Bullish/Bearish engulfing pattern inside zone
+        rejection: Rejection wick from zone boundary
+        micro_break: Close breaks previous high (LONG) or low (SHORT)
+    """
+    # If refinement is disabled, always pass
+    if not parameters.rtf_refinement_enabled:
+        return True
+    
+    # Need at least 1 previous candle for all rules
+    if current_idx < 1:
+        return False
+    
+    # Ensure we have enough candles for lookback
+    if current_idx < parameters.rtf_refinement_lookback:
+        return False
+    
+    # Determine if this is a LONG or SHORT setup based on current polarity
+    is_long = polarity == ZoneType.DEMAND
+    
+    # Calculate zone boundaries for rejection rule
+    if is_long:
+        # Demand zone: proximal is top, distal is bottom
+        zone_top = zone.proximal
+        zone_bottom = zone.distal
+    else:
+        # Supply zone: proximal is bottom, distal is top
+        zone_bottom = zone.proximal
+        zone_top = zone.distal
+    
+    # Apply the configured refinement rule
+    rule = parameters.rtf_refinement_rule.lower()
+    
+    if rule == "engulfing":
+        if is_long:
+            return check_bullish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
+        else:
+            return check_bearish_engulfing(candles, current_idx, parameters.rtf_refinement_lookback)
+    
+    elif rule == "rejection":
+        if is_long:
+            return check_bullish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+        else:
+            return check_bearish_rejection(candles, current_idx, zone_bottom, zone_top, parameters.rtf_refinement_lookback)
+    
+    elif rule == "micro_break":
+        if is_long:
+            return check_bullish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
+        else:
+            return check_bearish_micro_break(candles, current_idx, parameters.rtf_refinement_lookback)
+    
+    else:
+        # Unknown rule, fail refinement
+        return False

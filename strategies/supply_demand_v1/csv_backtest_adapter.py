@@ -78,6 +78,7 @@ from strategies.supply_demand_v1.strategy import (
     calculate_pnl_with_costs,
     check_polarity_flip,
     get_zone_polarity_at_idx,
+    check_rtf_refinement,
 )
 
 from strategies.supply_demand_v1.integrity import (
@@ -410,6 +411,9 @@ class DecisionFunnel:
     rejected_min_setup_score: int = 0
     rejected_min_reward_risk: int = 0
     rejected_proximity: int = 0  # Rejected by proximity trigger (price too far from zone)
+    refinement_attempts: int = 0  # Attempts at RTF entry refinement
+    refinement_pass: int = 0      # Refinement passed (order placed)
+    refinement_fail: int = 0      # Refinement failed (no order placed)
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
@@ -1644,6 +1648,25 @@ def execute_backtest_for_symbol(
                             funnel.rejected_proximity += 1
                             continue
                 
+                # RTF ENTRY REFINEMENT: Check if refinement criteria are met
+                # This runs AFTER proximity trigger passes, BEFORE order placement
+                # If refinement fails, skip order but keep zone active for future attempts
+                funnel.refinement_attempts += 1
+                
+                if not check_rtf_refinement(
+                    ltf_candles_list,
+                    ltf_idx,
+                    zone,
+                    zone_polarity_now,
+                    params
+                ):
+                    # Refinement failed - skip order placement but keep zone active
+                    funnel.refinement_fail += 1
+                    continue
+                
+                # Refinement passed (or disabled) - proceed with order placement
+                funnel.refinement_pass += 1
+                
                 # Build trade plan
                 plan = build_trade_plan(
                     zone,
@@ -2241,6 +2264,10 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         itf_tf=config['timeframes']['itf'],
         ltf_tf=config['timeframes']['ltf'],
         rtf_tf=config['timeframes']['rtf'],
+        # RTF refinement configuration (with defaults)
+        rtf_refinement_enabled=config.get('rtf_refinement', {}).get('enabled', False),
+        rtf_refinement_rule=config.get('rtf_refinement', {}).get('rule', 'engulfing'),
+        rtf_refinement_lookback=config.get('rtf_refinement', {}).get('lookback', 2),
     )
     
     # Check if parallel execution is enabled
@@ -2677,6 +2704,9 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'rejected_min_setup_score': sum(f.rejected_min_setup_score for f in result.decision_funnels),
             'rejected_min_reward_risk': sum(f.rejected_min_reward_risk for f in result.decision_funnels),
             'rejected_proximity': sum(f.rejected_proximity for f in result.decision_funnels),
+            'refinement_attempts': sum(f.refinement_attempts for f in result.decision_funnels),
+            'refinement_pass': sum(f.refinement_pass for f in result.decision_funnels),
+            'refinement_fail': sum(f.refinement_fail for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
@@ -2744,7 +2774,11 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
     if agg['rejected_min_reward_risk'] > 0:
         print(f"  ├─ Rejected (Min R:R):     {agg['rejected_min_reward_risk']}")
     if agg.get('rejected_proximity', 0) > 0:
-        print(f"  └─ Rejected (Proximity):   {agg['rejected_proximity']}")
+        print(f"  ├─ Rejected (Proximity):   {agg['rejected_proximity']}")
+    if agg.get('refinement_attempts', 0) > 0:
+        print(f"  ├─ Refinement Attempts:    {agg['refinement_attempts']}")
+        print(f"  │  ├─ Passed:              {agg['refinement_pass']}")
+        print(f"  │  └─ Failed:              {agg['refinement_fail']}")
     print(f"Orders Placed:               {agg['orders_placed']}")
     print(f"  ├─ Filled:                 {agg['orders_filled']}")
     print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")
