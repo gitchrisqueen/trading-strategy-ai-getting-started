@@ -19,41 +19,15 @@ remains in strategy.py for now.
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
-from enum import Enum
 
-
-
-class CurveLocation(Enum):
-    """Price location within the HTF range"""
-    HIGH = "high"
-    EQUILIBRIUM = "equilibrium"
-    LOW = "low"
-
-
-class TrendDirection(Enum):
-    """Trend direction on ITF"""
-    UP = "up"
-    DOWN = "down"
-    SIDEWAYS = "sideways"
-
-
-class ZoneType(Enum):
-    """Type of supply/demand zone"""
-    DEMAND = "demand"  # Drop-Base-Rally (DBR)
-    SUPPLY = "supply"  # Rally-Base-Drop (RBD)
-
-
-class EntryMode(Enum):
-    """Entry execution mode"""
-    LIMIT = "limit"  # Place limit order at proximal
-    CONFIRMATION = "confirmation"  # Wait for price to reverse through proximal
-
-
-class OrderState(Enum):
-    """Order state for limit orders"""
-    PENDING = "pending"  # Order placed but not filled
-    FILLED = "filled"  # Order filled
-    CANCELLED = "cancelled"  # Order cancelled (TTL expired)
+# Import canonical enum definitions from types module
+from .types import (
+    CurveLocation,
+    TrendDirection,
+    ZoneType,
+    EntryMode,
+    OrderState,
+)
 
 
 @dataclass

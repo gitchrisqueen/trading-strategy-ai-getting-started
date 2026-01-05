@@ -47,13 +47,19 @@ from .strategy import (
     manage_trade_plan,
     calculate_r_multiple,
     
-    # Data classes and enums
+    # Data classes
     Zone,
+    TradePlan,
+)
+
+# Import enums from canonical types module
+from .types import (
     ZoneType,
     CurveLocation,
     TrendDirection,
     EntryMode,
     OrderState,
+    ViolationType,
 )
 
 __version__ = "1.0.0-skeleton"
@@ -91,11 +97,15 @@ __all__ = [
     "manage_trade_plan",
     "calculate_r_multiple",
     
-    # Data classes and enums
+    # Data classes
     "Zone",
+    "TradePlan",
+    
+    # Enums
     "ZoneType",
     "CurveLocation",
     "TrendDirection",
     "EntryMode",
     "OrderState",
+    "ViolationType",
 ]

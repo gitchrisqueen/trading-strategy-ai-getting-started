@@ -13,7 +13,6 @@ Execution-specific logic:
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
-from enum import Enum
 
 # Re-export everything from strategy_core for backward compatibility
 from .strategy_core import *
@@ -43,38 +42,6 @@ from .strategy_core import (
     # Utility
     calculate_body_and_range, calculate_r_multiple,
 )
-
-class CurveLocation(Enum):
-    """Price location within the HTF range"""
-    HIGH = "high"
-    EQUILIBRIUM = "equilibrium"
-    LOW = "low"
-
-
-class TrendDirection(Enum):
-    """Trend direction on ITF"""
-    UP = "up"
-    DOWN = "down"
-    SIDEWAYS = "sideways"
-
-
-class ZoneType(Enum):
-    """Type of supply/demand zone"""
-    DEMAND = "demand"  # Drop-Base-Rally (DBR)
-    SUPPLY = "supply"  # Rally-Base-Drop (RBD)
-
-
-class EntryMode(Enum):
-    """Entry execution mode"""
-    LIMIT = "limit"  # Place limit order at proximal
-    CONFIRMATION = "confirmation"  # Wait for price to reverse through proximal
-
-
-class OrderState(Enum):
-    """Order state for limit orders"""
-    PENDING = "pending"  # Order placed but not filled
-    FILLED = "filled"  # Order filled
-    CANCELLED = "cancelled"  # Order cancelled (TTL expired)
 
 
 @dataclass
