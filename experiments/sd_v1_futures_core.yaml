@@ -24,11 +24,11 @@ historical_data:
 # FUTURES symbols (perpetual contracts)
 # These are formatted for Binance/Bybit futures notation
 symbols:
-  - "BTCUSDT"    # Bitcoin perpetual
-  - "ETHUSDT"    # Ethereum perpetual
-  - "BNBUSDT"    # Binance Coin perpetual
+#  - "BTCUSDT"    # Bitcoin perpetual
+#  - "ETHUSDT"    # Ethereum perpetual
+#  - "BNBUSDT"    # Binance Coin perpetual
   - "SOLUSDT"    # Solana perpetual
-  - "XRPUSDT"    # Ripple perpetual
+#  - "XRPUSDT"    # Ripple perpetual
 
 # Time range for backtest
 # Option 1: Use explicit dates
@@ -43,7 +43,13 @@ timeframes:
   htf: "4h"   # Higher timeframe for curve analysis
   itf: "1h"   # Intermediate timeframe for trend
   ltf: "15m"  # Lower timeframe for zone detection and entry
-  rtf: null   # Refining timeframe (optional)
+  rtf: "5m"   # Refining timeframe (optional)
+
+# Refinement Params
+rtf_refinement:
+  enabled: true
+  rule: "rejection"  # or "engulfing" or "micro_break"
+  lookback: 2
 
 # Candle classification
 candle_classification:

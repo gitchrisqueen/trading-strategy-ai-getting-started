@@ -34,14 +34,20 @@ timeframes:
   htf: "4h"   # Higher timeframe for curve analysis
   itf: "1h"   # Intermediate timeframe for trend
   ltf: "15m"  # Lower timeframe for zone detection and entry
-  rtf: null   # Refining timeframe (optional)
+  rtf: "5m"   # Refining timeframe (optional)
+  
+# Refinement Params
+rtf_refinement:
+  enabled: true
+  rule: "rejection"  # or "engulfing" or "micro_break"
+  lookback: 2
 
 # Parallel execution settings (optional)
 parallel:
   enabled: true  # Set to true to enable parallel execution
-  workers: 2      # Number of worker processes (default: CPU count - 1)
-  chunk_size: 1   # Symbols per chunk (default: 2)
-  fail_fast: true # Stop on first error (default: true)
+  workers: 4      # Number of worker processes (default: CPU count - 1)
+  chunk_size: 2   # Symbols per chunk (default: 2)
+  fail_fast: false # Stop on first error (default: true)
 
 # Candle classification
 candle_classification:

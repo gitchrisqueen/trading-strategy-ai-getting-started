@@ -24,7 +24,7 @@ historical_data:
 # FUTURES symbols (perpetual contracts)
 # These are formatted for Binance/Bybit futures notation
 symbols:
-  - "BTCUSDT"    # Bitcoin perpetual
+#  - "BTCUSDT"    # Bitcoin perpetual
   - "SOLUSDT"    # Solana perpetual
  
 # Time range for backtest
