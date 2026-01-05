@@ -414,6 +414,8 @@ class DecisionFunnel:
     refinement_attempts: int = 0  # Attempts at RTF entry refinement
     refinement_pass: int = 0      # Refinement passed (order placed)
     refinement_fail: int = 0      # Refinement failed (no order placed)
+    zones_attempted: int = 0      # Zones that had at least one order attempt
+    zones_disabled_by_attempts: int = 0  # Zones disabled due to max attempts reached
     orders_placed: int = 0
     orders_filled: int = 0
     orders_expired_ttl: int = 0
@@ -1487,6 +1489,30 @@ def execute_backtest_for_symbol(
             for zone_id, zone in active_zones.items():
                 # Zone is guaranteed to be created and fresh (by active_zones dict)
                 
+                # CHECK IF ZONE IS DISABLED: Skip zones that exceeded max attempts
+                if zone.disabled:
+                    continue  # Zone disabled, skip entirely (no refinement, no scoring)
+                
+                # CHECK COOLDOWN: If cooldown is enabled, allow retry after cooldown period
+                if zone.attempts >= params.max_attempts_per_zone:
+                    if params.cooldown_bars is not None and zone.last_attempt_idx is not None:
+                        # Check if cooldown period has elapsed
+                        bars_since_attempt = ltf_idx - zone.last_attempt_idx
+                        if bars_since_attempt >= params.cooldown_bars:
+                            # Cooldown period elapsed, re-enable zone (reset attempts)
+                            zone.attempts = 0
+                            zone.last_attempt_idx = None
+                            zone.disabled = False
+                        else:
+                            # Still in cooldown, skip
+                            continue
+                    else:
+                        # No cooldown configured, disable zone permanently
+                        if not zone.disabled:
+                            zone.disabled = True
+                            funnel.zones_disabled_by_attempts += 1
+                        continue
+                
                 # PROXIMITY TRIGGER: Skip zones that were just created
                 # Zones need time to "cool off" before we consider placing orders
                 # This prevents placing orders at zone creation (not a retest)
@@ -1684,6 +1710,13 @@ def execute_backtest_for_symbol(
                 # Place order
                 plan.placed_at_idx = ltf_idx
                 
+                # INCREMENT ZONE ATTEMPTS: Track that this zone has an order placed
+                # This happens ONLY when order enters PLACED state, not on refinement attempt
+                if zone.attempts == 0:
+                    funnel.zones_attempted += 1  # First attempt on this zone
+                zone.attempts += 1
+                zone.last_attempt_idx = ltf_idx
+                
                 # Generate unique order ID
                 order_id = f"{symbol}_{order_id_counter}"
                 order_id_counter += 1
@@ -1878,6 +1911,10 @@ def execute_backtest_for_symbol(
             'final_polarity_type': final_polarity.value,
             'flip_count': zone.flip_count,
             'last_flip_idx': zone.last_flip_idx,
+            # Attempt tracking fields
+            'attempts': zone.attempts,
+            'last_attempt_idx': zone.last_attempt_idx,
+            'disabled': zone.disabled,
         })
     
     if enable_profiling:
@@ -2268,6 +2305,9 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         rtf_refinement_enabled=config.get('rtf_refinement', {}).get('enabled', False),
         rtf_refinement_rule=config.get('rtf_refinement', {}).get('rule', 'engulfing'),
         rtf_refinement_lookback=config.get('rtf_refinement', {}).get('lookback', 2),
+        # Zone attempt tracking configuration (with defaults)
+        max_attempts_per_zone=config.get('zone_attempts', {}).get('max_attempts', 1),
+        cooldown_bars=config.get('zone_attempts', {}).get('cooldown_bars', None),
     )
     
     # Check if parallel execution is enabled
@@ -2707,6 +2747,8 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
             'refinement_attempts': sum(f.refinement_attempts for f in result.decision_funnels),
             'refinement_pass': sum(f.refinement_pass for f in result.decision_funnels),
             'refinement_fail': sum(f.refinement_fail for f in result.decision_funnels),
+            'zones_attempted': sum(f.zones_attempted for f in result.decision_funnels),
+            'zones_disabled_by_attempts': sum(f.zones_disabled_by_attempts for f in result.decision_funnels),
             'orders_placed': sum(f.orders_placed for f in result.decision_funnels),
             'orders_filled': sum(f.orders_filled for f in result.decision_funnels),
             'orders_expired_ttl': sum(f.orders_expired_ttl for f in result.decision_funnels),
@@ -2779,6 +2821,10 @@ def write_artifacts(result: ExperimentResult, artifacts_dir: Path):
         print(f"  ├─ Refinement Attempts:    {agg['refinement_attempts']}")
         print(f"  │  ├─ Passed:              {agg['refinement_pass']}")
         print(f"  │  └─ Failed:              {agg['refinement_fail']}")
+    if agg.get('zones_attempted', 0) > 0:
+        print(f"  ├─ Zones Attempted:        {agg['zones_attempted']}")
+    if agg.get('zones_disabled_by_attempts', 0) > 0:
+        print(f"  ├─ Zones Disabled (Max):   {agg['zones_disabled_by_attempts']}")
     print(f"Orders Placed:               {agg['orders_placed']}")
     print(f"  ├─ Filled:                 {agg['orders_filled']}")
     print(f"  └─ Expired (TTL):          {agg['orders_expired_ttl']}")
