@@ -572,3 +572,312 @@ class TestPnLWithCosts:
         pnl = calculate_pnl_with_costs(trade_plan, 110.0, params)
         
         assert pnl == 0.0, "Unfilled order should have zero PnL"
+
+
+class TestWickBasedFills:
+    """Test that fills are based on OHLC wicks (high/low), not just close price"""
+    
+    def test_long_fills_on_wick_low_below_limit(self):
+        """LONG limit at 100: candle low=99 (wick) → should fill"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        trade_plan.placed_at_idx = 0
+        
+        # Candle with wick down to 99 (below limit of 100), but closes at 105
+        # This tests that we're using LOW (wick), not CLOSE
+        candles = [
+            {'open': 104, 'high': 106, 'low': 99, 'close': 105},  # Low=99 < limit=100
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is True, "LONG order should fill when wick (low) touches limit, regardless of close"
+        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.filled_at_idx == 0
+        # Fill price should be limit (100.0), not the wick low (99)
+        assert trade_plan.actual_entry_price is not None
+    
+    def test_short_fills_on_wick_high_above_limit(self):
+        """SHORT limit at 100: candle high=101 (wick) → should fill"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 98.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        trade_plan.placed_at_idx = 0
+        
+        # Candle with wick up to 101 (above limit of 100), but closes at 95
+        # This tests that we're using HIGH (wick), not CLOSE
+        candles = [
+            {'open': 96, 'high': 101, 'low': 94, 'close': 95},  # High=101 > limit=100
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is True, "SHORT order should fill when wick (high) touches limit, regardless of close"
+        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.filled_at_idx == 0
+        assert trade_plan.actual_entry_price is not None
+    
+    def test_long_not_filled_when_wick_above_limit(self):
+        """LONG limit at 100: candle low=101 (above limit) → should NOT fill"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        trade_plan.placed_at_idx = 0
+        
+        # Candle never touches limit (low=101 > limit=100)
+        candles = [
+            {'open': 105, 'high': 107, 'low': 101, 'close': 103},  # Low=101 > limit=100
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is False, "LONG order should NOT fill when low never reaches limit"
+        # Compare by value due to enum comparison issue
+        assert trade_plan.order_state.value == 'pending'
+    
+    def test_short_not_filled_when_wick_below_limit(self):
+        """SHORT limit at 100: candle high=99 (below limit) → should NOT fill"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 98.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        trade_plan.placed_at_idx = 0
+        
+        # Candle never touches limit (high=99 < limit=100)
+        candles = [
+            {'open': 95, 'high': 99, 'low': 93, 'close': 97},  # High=99 < limit=100
+        ]
+        
+        filled = check_limit_order_fill(trade_plan, candles, 0, params)
+        
+        assert filled is False, "SHORT order should NOT fill when high never reaches limit"
+        # Compare by value due to enum comparison issue
+        assert trade_plan.order_state.value == 'pending'
+
+
+class TestSameCandleFills:
+    """Test that orders can fill on the same candle where they are placed"""
+    
+    def test_long_same_candle_fill(self):
+        """Test LONG order fills on same candle if wick touches limit"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        
+        # Simulate order placement at candle index 5
+        placed_idx = 5
+        trade_plan.placed_at_idx = placed_idx
+        
+        # Same candle where order is placed has wick touching limit
+        candles = [
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},  # Dummy candles 0-4
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 104, 'high': 106, 'low': 99, 'close': 105},  # Index 5: low=99 touches limit=100
+        ]
+        
+        # Check fill on the SAME candle where order was placed
+        filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
+        
+        assert filled is True, "Order should fill on same candle if price touches limit"
+        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.filled_at_idx == placed_idx
+    
+    def test_short_same_candle_fill(self):
+        """Test SHORT order fills on same candle if wick touches limit"""
+        zone = Zone(
+            zone_type=ZoneType.SUPPLY,
+            proximal=100.0,
+            distal=105.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            fees_bps=10.0,
+            slippage_bps=5.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 98.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        
+        # Simulate order placement at candle index 3
+        placed_idx = 3
+        trade_plan.placed_at_idx = placed_idx
+        
+        # Same candle where order is placed has wick touching limit
+        candles = [
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},  # Dummy candles 0-2
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 96, 'high': 101, 'low': 94, 'close': 95},  # Index 3: high=101 touches limit=100
+        ]
+        
+        # Check fill on the SAME candle where order was placed
+        filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
+        
+        assert filled is True, "Order should fill on same candle if price touches limit"
+        assert trade_plan.order_state == OrderState.FILLED
+        assert trade_plan.filled_at_idx == placed_idx
+    
+    def test_no_same_candle_fill_when_price_no_touch(self):
+        """Test order does NOT fill on same candle if price doesn't touch limit"""
+        zone = Zone(
+            zone_type=ZoneType.DEMAND,
+            proximal=100.0,
+            distal=95.0,
+            created_at=0,
+            base_start_idx=0,
+            base_end_idx=1,
+            legout_end_idx=2,
+            base_len=2,
+            legout_len=1,
+            is_fresh=True
+        )
+        
+        params = SupplyDemandParameters(
+            stop_buffer_pct=0.0,
+            ttl_bars=10
+        )
+        
+        trade_plan = build_trade_plan(
+            zone, 102.0, 10000.0, params, None
+        )
+        
+        assert trade_plan is not None
+        
+        # Simulate order placement at candle index 2
+        placed_idx = 2
+        trade_plan.placed_at_idx = placed_idx
+        
+        # Same candle where order is placed does NOT touch limit (low=103 > limit=100)
+        candles = [
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},  # Dummy candles
+            {'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'open': 105, 'high': 107, 'low': 103, 'close': 106},  # Index 2: low=103 doesn't touch limit=100
+        ]
+        
+        # Check fill on the SAME candle where order was placed
+        filled = check_limit_order_fill(trade_plan, candles, placed_idx, params)
+        
+        assert filled is False, "Order should NOT fill if price doesn't touch limit"
+        # Compare by value due to enum comparison issue
+        assert trade_plan.order_state.value == 'pending'
