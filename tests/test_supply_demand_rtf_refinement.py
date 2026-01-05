@@ -103,7 +103,9 @@ def test_check_bullish_rejection_pass():
     zone_bottom = 95
     zone_top = 98
     
-    assert check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2) is True
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is True
+    assert debug_info is None
 
 
 def test_check_bullish_rejection_fail_no_wick():
@@ -116,7 +118,10 @@ def test_check_bullish_rejection_fail_no_wick():
     zone_bottom = 95
     zone_top = 98
     
-    assert check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2) is False
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is False
+    assert debug_info is not None
+    assert "reason" in debug_info
 
 
 def test_check_bullish_rejection_fail_didnt_touch_zone():
@@ -128,7 +133,10 @@ def test_check_bullish_rejection_fail_didnt_touch_zone():
     zone_bottom = 95
     zone_top = 98
     
-    assert check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2) is False
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is False
+    assert debug_info is not None
+    assert debug_info["reason"] == "didnt_touch_zone"
 
 
 # ============================================================================
@@ -146,7 +154,9 @@ def test_check_bearish_rejection_pass():
     zone_bottom = 102
     zone_top = 105
     
-    assert check_bearish_rejection(candles, 0, zone_bottom, zone_top, lookback=2) is True
+    passed, debug_info = check_bearish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is True
+    assert debug_info is None
 
 
 def test_check_bearish_rejection_fail_no_wick():
@@ -159,7 +169,10 @@ def test_check_bearish_rejection_fail_no_wick():
     zone_bottom = 102
     zone_top = 105
     
-    assert check_bearish_rejection(candles, 0, zone_bottom, zone_top, lookback=2) is False
+    passed, debug_info = check_bearish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is False
+    assert debug_info is not None
+    assert "reason" in debug_info
 
 
 # ============================================================================
@@ -238,8 +251,11 @@ def test_check_rtf_refinement_disabled():
         legout_len=1,
     )
     
-    # Should always pass when disabled
-    assert check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params) is True
+    # Should always pass when disabled (returns True, None, None)
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params)
+    assert passed is True
+    assert failure_reason is None
+    assert debug_info is None
 
 
 def test_check_rtf_refinement_engulfing_long():
@@ -269,7 +285,10 @@ def test_check_rtf_refinement_engulfing_long():
     )
     
     # Should pass with bullish engulfing for LONG (DEMAND polarity)
-    assert check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params) is True
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params)
+    assert passed is True
+    assert failure_reason is None
+    assert debug_info is None
 
 
 def test_check_rtf_refinement_engulfing_short():
@@ -299,7 +318,10 @@ def test_check_rtf_refinement_engulfing_short():
     )
     
     # Should pass with bearish engulfing for SHORT (SUPPLY polarity)
-    assert check_rtf_refinement(candles, 1, zone, ZoneType.SUPPLY, params) is True
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.SUPPLY, params)
+    assert passed is True
+    assert failure_reason is None
+    assert debug_info is None
 
 
 def test_check_rtf_refinement_micro_break_long():
@@ -328,7 +350,10 @@ def test_check_rtf_refinement_micro_break_long():
     )
     
     # Should pass with bullish micro break for LONG
-    assert check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params) is True
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params)
+    assert passed is True
+    assert failure_reason is None
+    assert debug_info is None
 
 
 def test_check_rtf_refinement_insufficient_candles():
@@ -356,7 +381,10 @@ def test_check_rtf_refinement_insufficient_candles():
     )
     
     # Should fail with insufficient candles
-    assert check_rtf_refinement(candles, 0, zone, ZoneType.DEMAND, params) is False
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 0, zone, ZoneType.DEMAND, params)
+    assert passed is False
+    assert failure_reason == "insufficient_candles"
+    assert debug_info is not None
 
 
 def test_check_rtf_refinement_unknown_rule():
@@ -385,4 +413,130 @@ def test_check_rtf_refinement_unknown_rule():
     )
     
     # Should fail with unknown rule
-    assert check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params) is False
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 1, zone, ZoneType.DEMAND, params)
+    assert passed is False
+    assert failure_reason == "rejection_rule"
+    assert debug_info is not None
+
+
+# ============================================================================
+# Test Configurable Rejection Parameters
+# ============================================================================
+
+
+def test_check_bullish_rejection_with_relaxed_wick_ratio():
+    """Test bullish rejection with relaxed wick ratio threshold"""
+    candles = [
+        # Candle with 30% wick ratio (would fail default 40%)
+        {'open': 100, 'high': 110, 'low': 90, 'close': 107},  # range=20, wick=7, ratio=0.35
+    ]
+    
+    zone_bottom = 90
+    zone_top = 95
+    
+    # Should fail with default min_wick_ratio=0.40
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, min_wick_ratio=0.40)
+    assert passed is False
+    assert debug_info["reason"] == "wick_too_small"
+    assert debug_info["wick_ratio"] < 0.40
+    
+    # Should pass with relaxed min_wick_ratio=0.30
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, min_wick_ratio=0.30)
+    assert passed is True
+    assert debug_info is None
+
+
+def test_check_bullish_rejection_with_strict_body_ratio():
+    """Test bullish rejection with strict body ratio threshold"""
+    candles = [
+        # Candle with 55% body ratio (would pass default 50% max)
+        {'open': 100, 'high': 110, 'low': 90, 'close': 101},  # range=20, body=1, close_pos=0.55
+    ]
+    
+    zone_bottom = 90
+    zone_top = 95
+    
+    # Calculate actual values for this candle
+    # range = 110 - 90 = 20
+    # body = |101 - 100| = 1
+    # lower_wick = min(100, 101) - 90 = 10
+    # wick_ratio = 10 / 20 = 0.50 (passes default 0.40)
+    # body_ratio = 1 / 20 = 0.05 (passes default 0.50)
+    # close_position = (101 - 90) / 20 = 0.55 (passes 0.5)
+    
+    # This should pass with default parameters
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2)
+    assert passed is True
+    
+    # Create a candle that actually has a large body
+    candles_large_body = [
+        {'open': 95, 'high': 110, 'low': 90, 'close': 106},  # range=20, body=11, body_ratio=0.55
+    ]
+    
+    # Should pass with default max_body_ratio=0.50 (actually 0.55 > 0.50, so should fail)
+    passed, debug_info = check_bullish_rejection(candles_large_body, 0, zone_bottom, zone_top, lookback=2, max_body_ratio=0.50)
+    assert passed is False
+    assert debug_info["reason"] == "body_too_large"
+    
+    # Should pass with relaxed max_body_ratio=0.60
+    passed, debug_info = check_bullish_rejection(candles_large_body, 0, zone_bottom, zone_top, lookback=2, max_body_ratio=0.60)
+    assert passed is True
+
+
+def test_check_bullish_rejection_without_touch_zone_requirement():
+    """Test bullish rejection without requiring zone touch"""
+    candles = [
+        {'open': 100, 'high': 102, 'low': 99, 'close': 101},  # Doesn't touch zone
+    ]
+    
+    zone_bottom = 95
+    zone_top = 98
+    
+    # Should fail with require_touch_zone=True (default)
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, require_touch_zone=True)
+    assert passed is False
+    assert debug_info["reason"] == "didnt_touch_zone"
+    
+    # Should allow evaluation without touch requirement
+    # (will still fail other checks, but not due to touch)
+    passed, debug_info = check_bullish_rejection(candles, 0, zone_bottom, zone_top, lookback=2, require_touch_zone=False)
+    # May pass or fail based on other criteria, but won't be "didnt_touch_zone"
+    if not passed:
+        assert debug_info["reason"] != "didnt_touch_zone"
+
+
+def test_check_rtf_refinement_rejection_with_custom_params():
+    """Test RTF refinement with rejection rule using custom rejection params"""
+    params = SupplyDemandParameters(
+        rtf_refinement_enabled=True,
+        rtf_refinement_rule="rejection",
+        rtf_refinement_lookback=2,
+        # Relaxed parameters
+        rejection_min_wick_ratio=0.30,  # Lower than default 0.40
+        rejection_max_body_ratio=0.60,  # Higher than default 0.50
+        rejection_require_close_in_direction=True,
+        rejection_require_touch_zone=True,
+    )
+    
+    # Candle with 35% wick ratio (passes relaxed 0.30, would fail default 0.40)
+    candles = [
+        {'open': 100, 'high': 110, 'low': 90, 'close': 107},
+    ]
+    
+    zone = Zone(
+        zone_type=ZoneType.DEMAND,
+        proximal=95.0,
+        distal=90.0,
+        created_at=0,
+        base_start_idx=0,
+        base_end_idx=0,
+        legout_end_idx=0,
+        base_len=1,
+        legout_len=1,
+    )
+    
+    # Should pass with relaxed parameters
+    passed, failure_reason, debug_info = check_rtf_refinement(candles, 0, zone, ZoneType.DEMAND, params)
+    assert passed is True
+    assert failure_reason is None
+    assert debug_info is None
