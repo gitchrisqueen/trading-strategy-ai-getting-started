@@ -121,6 +121,12 @@ class SupplyDemandParameters:
     rtf_refinement_rule: str = "engulfing"  # "engulfing", "rejection", or "micro_break"
     rtf_refinement_lookback: int = 2  # Number of candles for refinement context
     
+    # RTF Rejection Rule Parameters (configurable thresholds)
+    rejection_min_wick_ratio: float = 0.40  # Minimum wick/range ratio (default 0.40 = 40%)
+    rejection_max_body_ratio: float = 0.50  # Maximum body/range ratio (default 0.50 = 50%)
+    rejection_require_close_in_direction: bool = True  # Require close in directional half
+    rejection_require_touch_zone: bool = True  # Require candle to touch zone boundary
+    
     # Zone Attempt Tracking & Cooldown
     max_attempts_per_zone: int = 1  # Maximum order placement attempts per zone (1 = no retries)
     cooldown_bars: Optional[int] = None  # Cooldown period before allowing retry (None = no cooldown)
