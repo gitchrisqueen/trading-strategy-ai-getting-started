@@ -9,15 +9,9 @@ This module provides validation functions to ensure backtest integrity by checki
 
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from enum import Enum
 
-
-class ViolationType(Enum):
-    """Types of integrity violations"""
-    LOOK_AHEAD = "look_ahead"
-    ENTRY_BEFORE_ZONE = "entry_before_zone"
-    R_CALCULATION_MISMATCH = "r_calculation_mismatch"
-    INSUFFICIENT_R = "insufficient_r"
+# Import canonical enum from types module
+from .types import ViolationType
 
 
 @dataclass
