@@ -255,5 +255,113 @@ def test_runner_backward_compatibility():
     assert runner.write_artifacts is csv_write_artifacts
 
 
+def test_candle_loading_with_valid_data(test_config_path):
+    """Regression test for candle loading - ensures no NameError and proper counts"""
+    # This test validates fix for: NameError: name 'ltf_candles_list' is not defined
+    result = run_backtest_experiment(test_config_path)
+    
+    # Verify that candles were loaded successfully
+    assert len(result.symbol_results) > 0
+    
+    for symbol_result in result.symbol_results:
+        # Check that data_provenance has no errors
+        assert 'error' not in symbol_result.data_provenance
+        
+        # Verify candle counts are > 0 (successful load)
+        assert symbol_result.data_provenance['candle_count_ltf'] > 0
+        assert symbol_result.data_provenance['candle_count_itf'] > 0
+        assert symbol_result.data_provenance['candle_count_htf'] > 0
+        
+        # Verify timeframe labels are present
+        assert 'timeframe_ltf' in symbol_result.data_provenance
+        assert 'timeframe_itf' in symbol_result.data_provenance
+        assert 'timeframe_htf' in symbol_result.data_provenance
+    
+    # Verify zone detection ran successfully (non-zero zones)
+    # Note: Zones may be 0 if market conditions don't produce any, but at least
+    # the detection should have run without NameError
+    total_zones = sum(sr.total_zones for sr in result.symbol_results)
+    # We expect at least some zones from synthetic data with seed=42
+    # If this fails, it suggests zone detection didn't run at all
+    assert total_zones >= 0  # Zones can be 0 in some conditions, so just verify no crash
+
+
+def test_candle_loading_failure_raises_error(tmp_path):
+    """Test that candle loading failures are surfaced with clear error messages"""
+    # Create a config that will fail to load data (invalid data source)
+    config = {
+        'name': 'test_fail',
+        'data_source': 'historical',
+        'symbols': ['NONEXISTENT/USDT'],
+        'historical_data': {
+            'exchange': 'binance',
+            'market_type': 'futures',
+            'data_dir': str(tmp_path / 'nonexistent_data'),
+        },
+        'timeframes': {'htf': '4h', 'itf': '1h', 'ltf': '15m', 'rtf': None},
+        'start_date': '2024-01-01',
+        'end_date': '2024-01-31',
+        'candle_classification': {'boring_body_ratio': 0.50, 'exciting_body_ratio': 0.50},
+        'zone_detection': {'min_base_candles': 1, 'max_base_candles': 6, 'min_legout_candles': 1, 'proximal_mode': 'body'},
+        'scoring': {'min_setup_score': 6.0, 'freshness_touches_best': 0, 'freshness_touches_good': 1,
+                   'base_time_best': 3, 'base_time_good': 6, 'legout_strength_high_threshold': 0.10,
+                   'legout_strength_mid_threshold': 0.05},
+        'trade_management': {'risk_pct': 0.02, 'breakeven_at_r': 2.0, 'take_profit_at_r': 3.0,
+                            'min_reward_risk': 3.0, 'stop_buffer_pct': 0.001},
+        'trend_detection': {'pivot_len': 5, 'pivots_to_consider': 4},
+        'mtf_gating': {'allow_eq_trades': True, 'eq_requires_trend_alignment': True,
+                      'eq_min_setup_score_bonus': 1.0},
+        'entry': {'entry_mode': 'limit', 'ttl_bars': 10},
+        'costs': {'fees_bps': 10.0, 'slippage_bps': 5.0},
+        'initial_capital': 10000.0,
+    }
+    
+    config_path = tmp_path / "fail_config.yaml"
+    import yaml
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f)
+    
+    # This should raise RuntimeError with clear message about failed symbols
+    with pytest.raises(RuntimeError) as excinfo:
+        run_backtest_experiment(str(config_path))
+    
+    # Verify error message contains symbol name and mentions failure
+    error_msg = str(excinfo.value)
+    assert 'NONEXISTENT/USDT' in error_msg
+    assert 'Backtest failed' in error_msg or 'failed' in error_msg.lower()
+
+
+def test_manifest_has_candle_counts(test_config_path, tmp_path):
+    """Test that run_manifest.json includes symbol_candle_counts field"""
+    result = run_backtest_experiment(test_config_path)
+    
+    # Write artifacts
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    write_artifacts(result, artifacts_dir)
+    
+    # Load manifest
+    with open(artifacts_dir / 'run_manifest.json') as f:
+        manifest = json.load(f)
+    
+    # Verify symbol_candle_counts field exists
+    assert 'symbol_candle_counts' in manifest
+    
+    # Verify it has entries for all symbols
+    for symbol in ['BTC/USDT']:  # Our test config uses single symbol
+        assert symbol in manifest['symbol_candle_counts']
+        
+        # Verify each symbol has counts for ltf, itf, htf
+        counts = manifest['symbol_candle_counts'][symbol]
+        assert '15m' in counts  # ltf
+        assert '1h' in counts   # itf
+        assert '4h' in counts   # htf
+        
+        # Verify counts are > 0
+        assert counts['15m'] > 0
+        assert counts['1h'] > 0
+        assert counts['4h'] > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

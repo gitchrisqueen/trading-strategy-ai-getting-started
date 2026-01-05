@@ -1736,7 +1736,7 @@ def execute_backtest_for_symbol(
                 funnel.refinement_attempts += 1
                 
                 if not check_rtf_refinement(
-                    ltf_candles_list,
+                    ltf_candles,
                     ltf_idx,
                     zone,
                     zone_polarity_now,
@@ -2062,6 +2062,13 @@ def run_symbol_backtest(
             'candle_count_itf': len(candles_by_tf['itf']),
             'candle_count_htf': len(candles_by_tf['htf']),
             'checksum_ltf': calculate_candle_checksum(ltf_candles),
+            # Add timeframe labels for clarity
+            'timeframe_ltf': config['timeframes']['ltf'],
+            'timeframe_itf': config['timeframes']['itf'],
+            'timeframe_htf': config['timeframes']['htf'],
+            # For synthetic data, used window equals available window
+            'used_first_ts': ltf_candles[0]['timestamp'].isoformat() if ltf_candles else None,
+            'used_last_ts': ltf_candles[-1]['timestamp'].isoformat() if ltf_candles else None,
         }
         
         # Calculate metrics
@@ -2413,6 +2420,26 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
     # Aggregate results (sort by symbol for determinism)
     symbol_results.sort(key=lambda r: r.symbol)
     
+    # FAIL FAST: Check for errors in symbol results before proceeding
+    failed_symbols = []
+    for result in symbol_results:
+        if hasattr(result, 'error'):
+            failed_symbols.append({
+                'symbol': result.symbol,
+                'error': result.error,
+                'error_type': result.data_provenance.get('error_type', 'Unknown')
+            })
+    
+    if failed_symbols:
+        error_summary = "\n".join([
+            f"  - {s['symbol']}: {s['error_type']} - {s['error']}"
+            for s in failed_symbols
+        ])
+        raise RuntimeError(
+            f"Backtest failed for {len(failed_symbols)} symbol(s):\n{error_summary}\n\n"
+            f"Cannot proceed with 0 zones/orders. Fix data loading issues above."
+        )
+    
     # Extract trades, zones, and orders from results
     all_trades = []
     all_zones = []
@@ -2572,8 +2599,15 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
     
     # Collect per-symbol data provenance
     symbol_data_provenance = {}
+    symbol_candle_counts = {}
     for sr in symbol_results:
         symbol_data_provenance[sr.symbol] = sr.data_provenance
+        # Extract candle counts for easy debugging
+        symbol_candle_counts[sr.symbol] = {
+            params.ltf_tf: sr.data_provenance.get('candle_count_ltf', 0),
+            params.itf_tf: sr.data_provenance.get('candle_count_itf', 0),
+            params.htf_tf: sr.data_provenance.get('candle_count_htf', 0),
+        }
     
     # Determine data source fields based on config
     data_source = config.get('data_source', 'synthetic')
@@ -2635,6 +2669,7 @@ def run_backtest_experiment(config_path: str = None, config: Dict[str, Any] = No
         },
         'candle_timeframe': params.ltf_tf,  # Legacy field for backward compatibility
         'symbol_data_provenance': symbol_data_provenance,
+        'symbol_candle_counts': symbol_candle_counts,  # Per-symbol candle counts for debugging
         # Order status counts (for validation)
         'order_status_counts': order_status_counts,
     }
