@@ -44,3 +44,5 @@ data/*_spot/*.csv
 
 # Data pipeline cache
 data/.cache/
+data_1_1_2026.zip
+poetry.backup-lock
