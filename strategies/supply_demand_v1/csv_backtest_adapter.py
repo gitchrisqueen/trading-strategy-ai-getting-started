@@ -1808,6 +1808,79 @@ def execute_backtest_for_symbol(
                 plan_id = id(plan)
                 plan_to_order_id[plan_id] = order_id
                 
+                # === SAME-CANDLE FILL CHECK (PR REQUIREMENT B) ===
+                # Check if the order can fill immediately on the same candle where it's placed
+                # This allows for same-candle fills when price has already touched the limit
+                same_candle_filled = check_limit_order_fill(
+                    plan,
+                    ltf_candles,
+                    ltf_idx,
+                    params
+                )
+                
+                if same_candle_filled:
+                    # Order filled on same candle - skip adding to pending_plans
+                    # Update order record in registry with fill
+                    order_registry_entry = {
+                        'symbol': symbol,
+                        'side': 'LONG' if get_zone_polarity_at_idx(zone, ltf_idx) == ZoneType.DEMAND else 'SHORT',
+                        'zone_id': make_zone_id(symbol, zone),
+                        'placed_idx': ltf_idx,
+                        'placed_time': ltf_candle.get('timestamp'),
+                        'limit_price': plan.entry_price,
+                        'stop': plan.stop_loss,
+                        'target': plan.take_profit,
+                        'planned_r': plan.r_multiple,
+                        'ttl_bars': params.ttl_bars,
+                        'expiry_idx': ltf_idx + params.ttl_bars if params.ttl_bars else None,
+                        'status': 'FILLED',
+                        'filled_idx': ltf_idx,
+                        'filled_time': ltf_candle.get('timestamp'),
+                        'fill_price': plan.actual_entry_price or plan.entry_price,
+                        'cancel_reason': None,
+                        'curve_state': enum_to_string(curve_state),
+                        'trend_state': enum_to_string(trend_state),
+                        'polarity_type_at_order': enum_to_string(get_zone_polarity_at_idx(zone, ltf_idx)),
+                        'flip_count_at_order': zone.flip_count,
+                    }
+                    order_registry[order_id] = order_registry_entry
+                    
+                    # Move directly to open positions (skip pending_plans)
+                    open_positions.append(plan)
+                    
+                    # Create trade record (entry)
+                    entry_polarity = get_zone_polarity_at_idx(plan.zone, ltf_idx)
+                    trades.append({
+                        'symbol': symbol,
+                        'side': 'LONG' if entry_polarity == ZoneType.DEMAND else 'SHORT',
+                        'entry': plan.actual_entry_price or plan.entry_price,
+                        'stop': plan.stop_loss,
+                        'target': plan.take_profit,
+                        'planned_R': plan.r_multiple,
+                        'planned_r': plan.r_multiple,
+                        'realized_R': None,  # Will be set on exit
+                        'entry_time': ltf_candle.get('timestamp'),
+                        'entry_idx': ltf_idx,
+                        'exit_time': None,
+                        'exit_idx': None,
+                        'exit_reason': None,
+                        'score': score,
+                        'curve_state': enum_to_string(curve_state),
+                        'trend_state': enum_to_string(trend_state),
+                        'zone_created_at': zone.created_at,
+                        'pnl': None,
+                        'position_size': plan.position_size,
+                        'polarity_type_at_entry': enum_to_string(entry_polarity),
+                        'flip_count_at_entry': zone.flip_count,
+                    })
+                    funnel.orders_filled += 1
+                    
+                    # ORDER DEDUPLICATION: Do NOT register in active_orders_by_zone
+                    # since order is already filled
+                    
+                    continue  # Skip the rest of order placement logic
+                
+                # Order not filled on same candle - add to pending_plans
                 pending_plans.append(plan)
                 
                 # Create order record with curve and trend state

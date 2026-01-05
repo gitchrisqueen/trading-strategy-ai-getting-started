@@ -1563,7 +1563,9 @@ def check_limit_order_fill(
         - TTL: Cancel if (current_idx - placed_at_idx) >= ttl_bars
     """
     # Check if order is still pending
-    if trade_plan.order_state != OrderState.PENDING:
+    # WORKAROUND: Enum comparison failing (duplicate imports), compare values instead
+    order_state_value = str(trade_plan.order_state.value if hasattr(trade_plan.order_state, 'value') else trade_plan.order_state)
+    if order_state_value != 'pending':
         return False
     
     # Check TTL expiration
@@ -1579,7 +1581,9 @@ def check_limit_order_fill(
     limit_price = trade_plan.entry_price
     
     # Check if price touched the limit
-    is_long = trade_plan.zone.zone_type == ZoneType.DEMAND
+    # WORKAROUND: Enum comparison failing (duplicate imports), compare values instead
+    zone_type_value = str(trade_plan.zone.zone_type.value if hasattr(trade_plan.zone.zone_type, 'value') else trade_plan.zone.zone_type)
+    is_long = (zone_type_value == 'demand')
     touched = False
     
     if is_long:
